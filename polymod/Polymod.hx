@@ -18,6 +18,9 @@ import thx.semver.VersionRule;
 
 using Lambda;
 using StringTools;
+#if lime
+using polymod.util.PromiseUtil;
+#end
 
 #if firetongue
 import firetongue.FireTongue;
@@ -215,6 +218,15 @@ class Polymod
    */
   public static var onError:Null<PolymodError->Void> = null;
 
+  public static var onScriptsLoaded:Null<Void->Void> = null;
+
+  public static var modRoot(get, never):String;
+
+  static function get_modRoot():String
+  {
+    return assetLibrary?.fileSystem?.modRoot ?? "./mods";
+  }
+
   /**
    * The internal asset library used by Polymod.
    */
@@ -265,7 +277,9 @@ class Polymod
 
     params.modIds ??= [];
     params.dirs ??= [];
+    params.ignoredFiles ??= [];
 
+    var shouldLoadMods:Bool = params.modIds.length == 0 && params.dirs.length == 0;
     if (params.fileSystemParams == null) params.fileSystemParams = {modRoot: modRoot};
     if (params.fileSystemParams.modRoot == null) params.fileSystemParams.modRoot = modRoot;
     if (params.apiVersionRule == null) params.apiVersionRule = VersionUtil.DEFAULT_VERSION_RULE;
@@ -369,20 +383,6 @@ class Polymod
     // Do scripted class initialization now that the assetLibrary is loaded.
     if (params.useScriptedClasses)
     {
-      Polymod.info(SCRIPT_PARSE_START, 'Parsing script classes...');
-      Polymod.clearScripts();
-
-      // Add the loaded mods to the Parser's preprocessor values.
-      for (mod in prevModsLoaded)
-      {
-        Parser.preprocessorValues.remove(mod.id);
-      }
-
-      for (mod in sortedModsToLoad)
-      {
-        Parser.preprocessorValues.set(mod.id, mod.modVersion.toString());
-      }
-
       if (params.loadScriptsAsync)
       {
         #if lime
@@ -743,7 +743,13 @@ class Polymod
    */
   public static function getDefaultIgnoreList():Array<String>
   {
-    return PolymodConfig.modIgnoreFiles.concat([PolymodConfig.modMetadataFile, PolymodConfig.modIconFile]);
+    var results:Array<String> = [];
+
+    results = results.concat(PolymodConfig.modIgnoreFiles);
+    results = results.concat(PolymodConfig.modIconFile);
+    results.push(PolymodConfig.modMetadataFile);
+
+    return results;
   }
 
   /**
@@ -830,6 +836,47 @@ class Polymod
   }
 
   /**
+   * Whether an object came from a script rather than from the game.
+   * @param target The object to check. Null is not scripted.
+   */
+  public static function isScriptedClass(target:Dynamic):Bool
+  {
+    if (target == null) return false;
+
+    if (Std.isOfType(target, polymod.hscript.HScriptedClass)) return true;
+
+    try
+    {
+      if (Reflect.field(target, '_asc') != null) return true;
+    }
+    catch (_:Dynamic) {}
+
+    return isCompiledScriptClass(target);
+  }
+
+  /**
+   * Whether an object's class was declared by a compiled (cppia) script.
+   *
+   * @param target The object to check. Null is not scripted.
+   */
+  public static function isCompiledScriptClass(target:Dynamic):Bool
+  {
+    #if (hxcpp && POLYMOD_CPPIA)
+    if (target == null) return false;
+
+    var cls:Null<Class<Dynamic>> = Type.getClass(target);
+    if (cls == null) return false;
+
+    var name:Null<String> = Type.getClassName(cls);
+    if (name == null) return false;
+
+    return polymod.hscript._internal.PolymodCppiaClassReference.isScriptClass(name);
+    #else
+    return false;
+    #end
+  }
+
+  /**
    * Clears all scripted functions and any registered scripted classes from the cache.
    * This is useful if you want to reload the scripts later.
    */
@@ -837,6 +884,9 @@ class Polymod
   {
     @:privateAccess
     polymod.hscript._internal.PolymodScriptClass.clearScriptedClasses();
+    #if POLYMOD_CPPIA
+    polymod.hscript._internal.PolymodCppiaClassReference.clearCppiaClasses();
+    #end
     polymod.hscript._internal.PolymodEnum.clearScriptedEnums();
     #if hscript_typer
     polymod.hscript._internal.PolymodTyperEx.clearAllModules();
@@ -844,12 +894,175 @@ class Polymod
     polymod.hscript.HScriptable.ScriptRunner.clearScripts();
   }
 
-  /**
-   * Get a list of all the available scripted classes (`.hxc` files), interpret them, and register any classes.
-   */
-  public static function registerAllScriptClasses():Void
+  static function prepareRegisterScriptedClasses():Void
   {
+    Polymod.clearScripts();
+    Parser.resetPreprocessorValues();
+
+    // Add the loaded mods to the Parser's preprocessor values.
+    for (mod in prevModsLoaded)
+    {
+      Parser.preprocessorValues.set(mod.id, mod.modVersion.toString());
+    }
+  }
+
+  /**
+   * Loads all compiled scripts (`.cppia` files) and registers any classes they provide.
+   */
+  static function registerAllCppiaClasses(?results:Map<String, Bool>):Void
+  {
+    if (results == null) results = [];
+
+    #if POLYMOD_CPPIA
     @:privateAccess {
+      var libraryIds:Array<String> = Polymod.assetLibrary.listLibraries();
+
+      var allBytes:Array<String> = Polymod.assetLibrary.list(BYTES);
+
+      var cppiaPaths:Array<String> = allBytes.filter(path -> PolymodConfig.cppiaClassExt.exists(ext -> path.endsWith(ext)));
+
+      cppiaPaths = polymod.hscript._internal.PolymodCPPIATarget.select(cppiaPaths);
+
+      for (binaryPath in cppiaPaths)
+      {
+        var path = binaryPath;
+        if (!Polymod.assetLibrary.exists(path))
+        {
+          for (libraryId in libraryIds)
+          {
+            if (Polymod.assetLibrary.exists('$libraryId:$binaryPath'))
+            {
+              path = '$libraryId:$binaryPath';
+              break;
+            }
+          }
+          if (!Polymod.assetLibrary.exists(path))
+          {
+            Polymod.error(SCRIPT_NOT_FOUND, 'Could not find file "$binaryPath"');
+            results.set(path, false);
+            continue;
+          }
+        }
+
+        var data:haxe.io.Bytes = null;
+        try
+        {
+          data = Polymod.assetLibrary.getBytes(path);
+        }
+        catch (e:Dynamic)
+        {
+          Polymod.error(SCRIPT_NOT_FOUND, 'Could not read compiled script "$path": $e');
+          results.set(path, false);
+          continue;
+        }
+
+        var registered = polymod.hscript._internal.PolymodCppiaClassReference.registerModule(data, path);
+        results.set(path, registered.length > 0);
+
+        if (registered.length == 0)
+        {
+          Polymod.warning(SCRIPT_PARSE_FAILED,
+            'Compiled script "$path" registered no classes, so nothing in it can be used.', SCRIPT_RUNTIME);
+        }
+      }
+      polymod.hscript._internal.PolymodCppiaClassReference.unloadInactiveModules();
+    }
+    #end
+  }
+
+  static function registerAllCppiaClassesAsync():Array<lime.app.Future<Bool>>
+  {
+    #if POLYMOD_CPPIA
+    @:privateAccess {
+      var libraryIds:Array<String> = Polymod.assetLibrary.listLibraries();
+      var allBytes:Array<String> = Polymod.assetLibrary.list(BYTES);
+      var cppiaPaths:Array<String> = allBytes.filter(path -> PolymodConfig.cppiaClassExt.exists(ext -> path.endsWith(ext)));
+
+      cppiaPaths = polymod.hscript._internal.PolymodCPPIATarget.select(cppiaPaths);
+
+      var futures:Array<lime.app.Future<Bool>> = [];
+      for (binaryPath in cppiaPaths)
+      {
+        var path:String = binaryPath;
+        if (!Polymod.assetLibrary.exists(path))
+        {
+          for (libraryId in libraryIds)
+          {
+            if (Polymod.assetLibrary.exists('$libraryId:$binaryPath'))
+            {
+              path = '$libraryId:$binaryPath';
+              break;
+            }
+          }
+          if (!Polymod.assetLibrary.exists(path))
+          {
+            Polymod.error(SCRIPT_NOT_FOUND, 'Could not find file "$binaryPath"');
+            continue;
+          }
+        }
+
+        var promise = new lime.app.Promise<Bool>();
+
+        futures.push(promise.future);
+        try
+        {
+          Polymod.assetLibrary.loadBytes(path).onComplete((bytes:Bytes) ->
+          {
+            try
+            {
+              var registered = polymod.hscript._internal.PolymodCppiaClassReference.registerModule(bytes, path);
+              if (registered.length == 0)
+              {
+                Polymod.warning(SCRIPT_PARSE_FAILED, 'Compiled script "$path" registered no classes, so nothing in it can be used.', SCRIPT_RUNTIME);
+              }
+              promise.complete(true);
+            }
+            catch (e)
+            {
+              promise.error(e);
+            }
+          }).onError((err) ->
+            {
+              if (err == '404')
+              {
+                Polymod.error(
+                  SCRIPT_PARSE_FAILED,
+                  'Error while loading compiled script "${path}", could not retrieve script contents (404 error)!',
+                  SCRIPT_RUNTIME
+                );
+              }
+              else
+              {
+                Polymod.error(SCRIPT_PARSE_FAILED, 'Error while parsing script ${path}: ' + '\n' + 'An unknown error occurred: ${err}', SCRIPT_RUNTIME);
+              }
+              promise.error(err);
+            });
+        }
+        catch (e:Dynamic)
+        {
+          Polymod.error(SCRIPT_NOT_FOUND, 'Could not read compiled script "$path": $e');
+          promise.error(e);
+          continue;
+        }
+      }
+      return futures;
+    }
+    #else
+    return [];
+    #end
+  }
+
+  /**
+   * Loads all script classes (`.hxc` files) and registers any classes they provide.
+   */
+  public static function registerAllScriptClasses():Map<String, Bool>
+  {
+    Polymod.info(SCRIPT_PARSE_START, 'Parsing script classes...');
+    prepareRegisterScriptedClasses();
+
+    @:privateAccess {
+      var results:Map<String, Bool> = [];
+
       // Go through each script and parse any classes in them.
       var potentialScripts:Array<String> = Polymod.assetLibrary.list(TEXT);
       var libraryIds:Array<String> = Polymod.assetLibrary.listLibraries();
@@ -869,35 +1082,52 @@ class Polymod
                 break;
               }
             }
-            if (!Polymod.assetLibrary.exists(path)) throw 'Couldn\'t find file "$textPath"';
+            if (!Polymod.assetLibrary.exists(path)) {
+              Polymod.error(SCRIPT_NOT_FOUND, 'Could not find file "$textPath"');
+              results.set(path, false);
+            }
           }
           Polymod.debug('Registering scripted class "$path"');
-          polymod.hscript._internal.PolymodScriptClass.registerScriptClassByPath(path);
+          var result = polymod.hscript._internal.PolymodScriptClass.registerScriptClassByPath(path);
+          results.set(path, result);
         }
       }
+
+      registerAllCppiaClasses(results);
 
       #if hscript_typer
       // in the future typed modules might have a use
       // but for now we just ignore the typed modules that are returned
       var _ = polymod.hscript._internal.PolymodTyperEx.typeAllModules();
       #end
-
       polymod.hscript._internal.Interp.validateImports();
+
+      if (Polymod.onScriptsLoaded != null) Polymod.onScriptsLoaded();
+      return results;
     }
   }
 
+  #if lime
   /**
    * Get a list of all the available scripted classes (`.hxc` files), interpret them asynchronously, and register any classes.
    * Called on platforms that don't support synchronous file access.
+   *
+   * @return A list of futures for each script class being registered, providing `true` for success or an error if failed.
    */
-  #if lime
-  public static function registerAllScriptClassesAsync():Array<lime.app.Future<Bool>>
+  public static function registerAllScriptClassesAsync():lime.app.Future<Array<lime.app.Future<Bool>>>
   {
+    Polymod.info(SCRIPT_PARSE_START, 'Parsing script classes asynchronously...');
+    prepareRegisterScriptedClasses();
+
+    var futures:Array<lime.app.Future<Bool>> = [];
+
+    // Load CPPIA scripts first asynchronously
+    futures = futures.concat(registerAllCppiaClassesAsync());
+
     // Go through each script and parse any classes in them.
     var potentialScripts:Array<String> = Polymod.assetLibrary.list(TEXT);
     var libraryIds:Array<String> = Polymod.assetLibrary.listLibraries();
 
-    var futures:Array<lime.app.Future<Bool>> = [];
     for (textPath in potentialScripts)
     {
       if (PolymodConfig.scriptClassExt.exists(ext -> textPath.endsWith(ext)))
@@ -915,15 +1145,23 @@ class Polymod
           }
           if (!Polymod.assetLibrary.exists(path)) throw 'Couldn\'t find file "$textPath" (tried libraries ${libraryIds})';
         }
-        Polymod.debug('Fetching scripted class "$path"');
         var future = polymod.hscript._internal.PolymodScriptClass.registerScriptClassByPathAsync(path);
         if (future != null) futures.push(future);
       }
     }
 
-    polymod.hscript._internal.Interp.validateImports();
+    return lime.app.Promise.allSettled(futures).then((results) -> {
+      #if POLYMOD_CPPIA
+      polymod.hscript._internal.PolymodCppiaClassReference.unloadInactiveModules();
+      #end
 
-    return futures;
+      // Once all scripts have been registered, THEN validate the imports.
+      polymod.hscript._internal.Interp.validateImports();
+
+      if (Polymod.onScriptsLoaded != null) Polymod.onScriptsLoaded();
+
+      return lime.app.Future.withValue(results);
+    });
   }
   #end
 
@@ -1012,6 +1250,7 @@ class Polymod
   public static function addImportAlias(importAlias:String, importClass:Class<Dynamic>):Void
   {
     PolymodScriptClass.importOverrides.set(importAlias, importClass);
+    PolymodScriptClass.bumpBlacklistGeneration();
   }
 
   /**
@@ -1050,6 +1289,7 @@ class Polymod
   public static function blacklistStaticFields(parentClass:Class<Dynamic>, fields:Array<String>):Void
   {
     PolymodScriptClass.blacklistedStaticFields.set(parentClass, fields);
+    PolymodScriptClass.bumpBlacklistGeneration();
   }
 
   /**
@@ -1060,6 +1300,19 @@ class Polymod
   public static function blacklistInstanceFields(parentClass:Class<Dynamic>, fields:Array<String>):Void
   {
     PolymodScriptClass.blacklistedInstanceFields.set(Type.getClassName(parentClass), fields);
+    PolymodScriptClass.bumpBlacklistGeneration();
+  }
+
+  /**
+   * Blacklist a field by name alone, on any class and on none.
+   * @param fields The field names no script may use.
+   */
+  public static function blacklistDynamicFieldNames(fields:Array<String>):Void
+  {
+    for (field in fields)
+      PolymodScriptClass.blacklistedDynamicFieldNames.set(field, true);
+
+    PolymodScriptClass.bumpBlacklistGeneration();
   }
 }
 
@@ -1216,9 +1469,24 @@ class ModMetadata
    * @param apiVersionRule The API version rule to check compatibility against.
    * @return Whether this mod is compatible with the provided API version rule.
    */
-  public function isCompatible(apiVersionRule:VersionRule):Bool
+  public function isCompatible(?apiVersionRule:VersionRule):Bool
   {
+    if (apiVersionRule == null) return true;
+
     return VersionUtil.match(apiVersion, apiVersionRule);
+  }
+
+  /**
+   * Determine whether this mod is compatible with the provided mod version rule.
+   *
+   * @param modVersionRule The mod version rule to check compatibility against.
+   * @return Whether this mod is compatible with the provided mod version rule.
+   */
+  public function isModCompatible(?modVersionRule:VersionRule):Bool
+  {
+    if (modVersionRule == null) return true;
+
+    return VersionUtil.match(modVersion, modVersionRule);
   }
 
   /**
@@ -1482,6 +1750,13 @@ enum abstract PolymodErrorCode(String) from String to String
    * - The default location for icons is `_polymod_icon.png`.
    */
   public var MOD_MISSING_ICON:String = 'mod_missing_icon';
+
+  /**
+   * File data from an archived mod (like a ZIP mod) could not be read.
+   * - Make sure the archive is not corrupted.
+   * - Use 7-Zip to create the archive and avoid other programs (like WinRAR and the Windows built-in ZIP tool) because they suck.
+   */
+  public var MOD_ARCHIVE_READ_FAILED:String = 'mod_archive_read_failed';
 
   //
   // Mod Loading Errors

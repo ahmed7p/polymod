@@ -160,6 +160,7 @@ enum Error
   EInvalidIterator(v:String);
   EInvalidOp(op:String);
   EInvalidAccess(f:String);
+  EPrivateField(f:String);
   EInvalidModule(m:String);
   EBlacklistedModule(m:String);
   EBlacklistedField(f:String);
@@ -180,6 +181,7 @@ enum Error
   EClassInvalidSuper; // Accessing "super" in a parentless class
   EScriptThrow(v:Dynamic); // Script called "throw"
   EScriptCallThrow(v:Dynamic); // Script called a function which threw
+  EInvalidAccessorCombination(accessors:Array<String>);
   // Fallback error type.
   ECustom(msg:String);
 }
@@ -259,6 +261,14 @@ typedef ClassDecl =
    * so imports have to be done in two passes.
    */
   var importsToValidate:Map<String, ClassImport>;
+
+  /**
+   * A list of usings that have yet to be validated
+   *
+   * Scripted classes that use other scripted classes might be parsed before the class they use,
+   * so usings have to be done in two passes.
+   */
+  var usingsToValidate:Map<String, ClassImport>;
 }
 
 /**
@@ -299,6 +309,11 @@ typedef ClassImport =
    * Will be `null` if this is not an abstract class.
    */
   var ?abs:PolymodStaticAbstractReference;
+
+  /**
+   * Whether this import is a wildcard and we need to validate it for later.
+   */
+  var ?wildcard:Bool;
 }
 
 typedef EnumDecl =

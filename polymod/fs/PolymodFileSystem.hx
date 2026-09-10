@@ -3,6 +3,9 @@ package polymod.fs;
 import polymod.Polymod;
 import thx.semver.VersionRule;
 import haxe.io.Bytes;
+#if lime
+import lime.app.Future;
+#end
 
 /**
  * Provides factory and utility functions for instantiating an IFileSystem.
@@ -50,9 +53,11 @@ class PolymodFileSystem
     #elseif nodefs
     // Node file system.
     return new polymod.fs.NodeFileSystem(params);
+    #elseif html5
+    // If you're on HTML5, you should use MemoryFileSystem or MemoryZipFileSystem.
+    return new polymod.fs.MemoryFileSystem(params);
     #else
     // No compatible file system.
-    // If you're on HTML5, you should use MemoryFileSystem or ZipFileSystem.
     return new polymod.fs.StubFileSystem(params);
     #end
   }
@@ -75,6 +80,8 @@ typedef PolymodFileSystemParams =
  */
 interface IFileSystem
 {
+  public final modRoot:String;
+
   /**
    * Returns whether the file or directory at the given path exists.
    *
@@ -130,6 +137,13 @@ interface IFileSystem
    */
   public function readDirectoryRecursive(path:String):Array<String>;
 
+  /**
+   * Returns a list of files contained within the provided mod directory path.
+   *
+   * @param modDir The mod path to check.
+   * @param recursive Whether to check all subfolder recursively. Returns only files.
+   * @return An array of file paths.
+   */
   public function readModDirectory(modDir:String, recursive:Bool = true):Array<String>;
 
   /**
@@ -194,4 +208,23 @@ interface IFileSystem
    * @return The mod metadata, or `null` if the mod does not exist.
    */
   public function getMetadataByModId(modId:String, ?origin:PolymodErrorOrigin):Null<ModMetadata>;
+
+  #if lime
+  /**
+   * Load the byte data for a file asynchronously.
+   *
+   * @param path The path to retrieve byte data from.
+   * @return A future which returns the file bytes.
+   */
+  public function loadFileBytes(path:String):Future<haxe.io.Bytes>;
+
+  /**
+   * Load the byte data for a file from a specific mod, asynchronously.
+   *
+   * @param path The path to retrieve byte data from, relative to the asset root.
+   * @param modId A specific mod ID to retrieve an asset from.
+   * @return A future which returns the file bytes.
+   */
+  public function loadFileBytesByModId(path:String, modId:String):Future<haxe.io.Bytes>;
+  #end
 }

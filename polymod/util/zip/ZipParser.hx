@@ -2,6 +2,7 @@ package polymod.util.zip;
 
 #if sys
 import haxe.Constraints.IMap;
+import haxe.EnumFlags;
 import haxe.ds.StringMap;
 import haxe.io.Bytes;
 import polymod.util.InsensitiveMap;
@@ -119,31 +120,47 @@ class ZipParser
   }
 
   /**
-   * Read the centeral directory header for a specific file,
-   * and generate a LocalFileHeader.
+   * Read the central directory header for a specific file, and generate a LocalFileHeader.
+   * This opens a new file handle to the ZIP file independent of `persistFileHandle`,
+   * so make sure to close it with `LocalFileHeader.closeFileHandle()` when done using it.
    *
    * @param localFileName A filename relative to the root of the ZIP file.
    * @return A LocalFileHeader for the specified file, or `null` if the file was not found.
    */
   public function getLocalFileHeaderOf(localFileName:String):Null<LocalFileHeader>
   {
-    buildFileHandle();
-    if (fileHandle == null) throw 'Failed to read ZIP file!';
+    if (!isValid()) throw 'Failed to read ZIP file!';
 
     var cdfh = centralDirectoryRecords.get(localFileName);
     if (cdfh == null)
     {
       Polymod.warning(ASSET_MISSING_FILE, 'The file $localFileName was not found in the zip: $fileName');
-
-      cleanupFileHandle();
       return null;
     }
 
-    fileHandle.seek(cdfh.localFileHeaderOffset, SeekBegin);
-    var lfh = new LocalFileHeader(fileHandle);
-    lfh.dataOffset = fileHandle.tell();
+    // This will always open a new handle, since it may be accessed by a different thread.
+    var localFileHandle:FileInput = File.read(this.fileName);
+    localFileHandle.seek(cdfh.localFileHeaderOffset, SeekBegin);
+    var lfh = new LocalFileHeader(localFileHandle);
+    if (!lfh.isValid())
+    {
+      Polymod.warning(ASSET_MISSING_FILE, 'Could not parse entry for $localFileName, it might be corrupted.');
 
-    cleanupFileHandle();
+      return null;
+    }
+
+    lfh.dataOffset = localFileHandle.tell();
+
+    // Headers with this flag have its relevant data set to zero.
+    // We populate it with the data from the central directory header instead.
+    // Ideally, we would get it from the data descriptor, but this is way easier.
+    if (lfh.generalPurposeBitFlag.has(DATA_DESCRIPTOR))
+    {
+      lfh.crc32code = cdfh.crc32code.sub(0, lfh.crc32code.length);
+      lfh.compressedSize = cdfh.compressedSize;
+      lfh.uncompressedSize = cdfh.uncompressedSize;
+    }
+
     return lfh;
   }
 
@@ -153,10 +170,8 @@ class ZipParser
    *
    * @return Whether this Zip Parser is still valid.
    */
-  public function isValid():Bool {
-    if (!sys.FileSystem.exists(fileName)) return false;
-
-    return true;
+  public inline function isValid():Bool {
+    return sys.FileSystem.exists(fileName);
   }
 
   function buildFileHandle() {
@@ -180,6 +195,32 @@ enum CompressionMethod
 {
   NONE;
   DEFLATE;
+}
+
+/**
+ * The flags in the general purpose bit field of a ZIP file header.
+ * See section 4.4.4 of the ZIP file format specification for details.
+ *
+ * Note that not all of them are included since they are not relevant to this implementation.
+ */
+enum GeneralPurposeFlags
+{
+  ENCRYPTED;
+  /**
+   * Bit used for IMPLODE, DEFLATE, and LZMA compression methods.
+   * Check the specification for details on how this bit is used for each compression method.
+   */
+  COMPRESSION_OPTION_1;
+  /**
+   * Bit used for IMPLODE, DEFLATE, and LZMA compression methods.
+   * Check the specification for details on how this bit is used for each compression method.
+   */
+  COMPRESSION_OPTION_2;
+  /**
+   * If this bit is set, the fields CRC-32, compressed size and uncompressed size
+   * are set to zero in the data descriptor immediately following the compressed data.
+   */
+  DATA_DESCRIPTOR;
 }
 
 /**
@@ -270,7 +311,7 @@ class LocalFileHeader extends Header
   /**
    * Local file header signature = 0x04034b50 (PK♥♦ or "PK\3\4")
    */
-  public static final HEADER_SIGNATURE = 0x04034B50;
+  public static inline final HEADER_SIGNATURE:Int = 0x04034B50;
 
   /**
    * Version needed to extract (minimum)
@@ -280,7 +321,7 @@ class LocalFileHeader extends Header
   /**
    * General purpose bit flag
    */
-  public var generalPurposeBitFlag:Bytes = Bytes.alloc(0);
+  public var generalPurposeBitFlag:EnumFlags<GeneralPurposeFlags> = new EnumFlags(0);
 
   /**
    * Compression method; e.g. none = 0, DEFLATE = 8 (or "\0x08\0x00")
@@ -339,7 +380,7 @@ class LocalFileHeader extends Header
     signature = getBytesFromFile(4);
 
     minVersionForExtraction = getBytesFromFile(2).getUInt16(0);
-    generalPurposeBitFlag = getBytesFromFile(2);
+    generalPurposeBitFlag = new EnumFlags(getBytesFromFile(2).getUInt16(0));
     compressionMethod = (getBytesFromFile(2).getUInt16(0) == 0) ? NONE : DEFLATE;
 
     var lastModifiedTime = getBytesFromFile(2);
@@ -386,10 +427,24 @@ class LocalFileHeader extends Header
         bytesRead += fileInput.readBytes(bytesToReturn, 0, compressedSize - bytesRead);
         bytesBuf.addBytes(bytesToReturn, 0, compressedSize - bytesRead);
       }
-      return (this.compressionMethod == DEFLATE) ? Util.unzipBytes(bytesBuf.getBytes()) : bytesBuf.getBytes();
+      bytesToReturn = bytesBuf.getBytes();
     }
 
     return (this.compressionMethod == DEFLATE) ? Util.unzipBytes(bytesToReturn) : bytesToReturn;
+  }
+
+  /**
+   * Closes the file handle for this header, if it exists.
+   * Note that this will render the header invalid for reading data,
+   * so it should only be called when it is no longer needed.
+   */
+  public function cleanupFileHandle()
+  {
+    if (fileInput != null)
+    {
+      fileInput.close();
+      fileInput = null;
+    }
   }
 
   /**
@@ -397,7 +452,11 @@ class LocalFileHeader extends Header
    */
   public function isValid()
   {
-    return signature.getInt32(0) == HEADER_SIGNATURE; // Std.parseInt(HEADER_SIGNATURE);
+    if (fileInput == null) return false;
+    if (compressedSize + uncompressedSize == 0 && !generalPurposeBitFlag.has(DATA_DESCRIPTOR)) return false;
+    if (signature.getInt32(0) != HEADER_SIGNATURE) return false;
+
+    return true;
   }
 
   public function toString()
@@ -405,10 +464,10 @@ class LocalFileHeader extends Header
     return '
         signature: ${signature.toHex()}
         minimum version to extract: $minVersionForExtraction
-        general purpose bit flags: ${generalPurposeBitFlag.toHex()}
+        general purpose bit flags: $generalPurposeBitFlag
         compression method: $compressionMethod
         last modified date: $lastModifiedDateTime
-        crc32: $crc32code
+        crc32: ${crc32code.toHex()}
         compressed size: $compressedSize
         uncompressed size: $uncompressedSize
         file name: $fileName
@@ -427,7 +486,7 @@ class CentralDirectoryFileHeader extends Header
   /**
    * Central directory file header signature = 0x02014b50
    */
-  public static final HEADER_SIGNATURE = 0x02014B50;
+  public static inline final HEADER_SIGNATURE:Int = 0x02014B50;
 
   /**
    * Version made by
@@ -442,7 +501,7 @@ class CentralDirectoryFileHeader extends Header
   /**
    * General purpose bit flag
    */
-  private var generalPurposeBitFlag:Bytes = Bytes.alloc(0);
+  public var generalPurposeBitFlag:EnumFlags<GeneralPurposeFlags> = new EnumFlags(0);
 
   /**
    * Compression method (none or deflate)
@@ -457,7 +516,7 @@ class CentralDirectoryFileHeader extends Header
   /**
    * CRC-32 of uncompressed data
    */
-  private var crc32code:Bytes = Bytes.alloc(0);
+  public var crc32code:Bytes = Bytes.alloc(0);
 
   /**
    * Compressed size (or 0xffffffff for ZIP64)
@@ -537,7 +596,7 @@ class CentralDirectoryFileHeader extends Header
     signature = getBytesFromFile(4);
     versionMadeBy = getBytesFromFile(2).getUInt16(0);
     versionToExtract = getBytesFromFile(2).getUInt16(0);
-    generalPurposeBitFlag = getBytesFromFile(2);
+    generalPurposeBitFlag = new EnumFlags(getBytesFromFile(2).getUInt16(0));
     compressionMethod = (getBytesFromFile(2).getUInt16(0) == 0) ? NONE : DEFLATE;
 
     var lastModifiedTime = getBytesFromFile(2);
@@ -580,7 +639,7 @@ class CentralDirectoryFileHeader extends Header
     return '
         version made by: $versionMadeBy
         version to extract: $versionToExtract
-        general purpose bit flags: ${generalPurposeBitFlag.toHex()}
+        general purpose bit flags: $generalPurposeBitFlag
         compression method: $compressionMethod
         last modified date: $lastModifiedDateTime
         crc32: ${crc32code.toHex()}
@@ -610,7 +669,7 @@ class EndOfCentralDirectoryRecord extends Header
   /**
    * End of central directory signature = 0x06054b50
    */
-  public static final SIGNATURE = 0x06054B50;
+  public static inline final SIGNATURE:Int = 0x06054B50;
 
   /**
    * Number of this disk (or 0xffff for ZIP64)

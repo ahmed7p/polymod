@@ -642,7 +642,8 @@ class Printer
           {
             var arg:Argument = f.args[i];
             if (arg.opt ?? false) output += "?";
-            output += arg.name + ":" + this.typeToString(arg.t);
+            output += arg.name;
+            if (arg.t != null) output += ":" + this.typeToString(arg.t);
             if (arg.value != null) output += " = " + this.exprToString(arg.value);
 
             if (i < f.args.length - 1) output += ", ";
@@ -682,8 +683,8 @@ class Printer
       if (m.params != null)
       {
         output += "(";
-        for (i in 0...m.params.length)
-        {
+      for (i in 0...m.params.length)
+      {
           var param:Expr = m.params[i];
           output += this.exprToString(param);
           if (i < m.params.length - 1) output += ", ";
@@ -725,6 +726,7 @@ class Printer
       case EInvalidIterator(v): 'Invalid iterator "$v".';
       case EInvalidOp(op): 'Invalid operator "$op".';
       case EInvalidAccess(f): 'Invalid access to field "$f".';
+      case EPrivateField(f): 'Cannot access private field "$f".';
       case EInvalidModule(m): 'Invalid module "$m".';
       case EBlacklistedModule(m): 'Blacklisted module "$m".';
       case EBlacklistedField(m): 'Blacklisted field "$m".';
@@ -746,6 +748,7 @@ class Printer
       // TODO: Do we need to distinguish these?
       case EScriptCallThrow(v): 'Script threw an exception:\n$v';
       case EScriptThrow(v): 'User script threw an exception:\n$v';
+      case EInvalidAccessorCombination(accessors): 'Invalid modifier combination: ${accessors.join(' + ')}';
       case ECustom(msg): msg;
     };
     #if hscriptPos

@@ -6,8 +6,11 @@ import lime.system.ThreadPool;
 import polymod.backends.PolymodAssetLibrary;
 import polymod.PolymodAssets.PolymodAssetType;
 import polymod.fs.PolymodFileSystem;
+import polymod.fs.PolymodFileSystem.IFileSystem;
 import polymod.Polymod;
+import polymod.Polymod.FrameworkParams;
 import polymod.util.Util;
+import polymod.util.ThreadSafety.SafeMap;
 
 using StringTools;
 
@@ -34,6 +37,7 @@ import lime.Assets.AssetType;
 import lime.audio.AudioBuffer;
 #end
 #end
+
 #if (!lime || nme)
 class LimeBackend extends StubBackend
 {
@@ -47,13 +51,19 @@ class LimeBackend extends StubBackend
   {
     Polymod.error(BACKEND_INIT_FAILED, "LimeBackend requires the lime library, did you forget to install it?", INIT);
   }
+
+  public function preloadSoundsToCache():Void
+  {
+    Polymod.error(BACKEND_INIT_FAILED, "LimeBackend requires the lime library, did you forget to install it?", INIT);
+  }
 }
 #else
 #if (!nme && !macro && lime)
 class LimeBackend implements IBackend
 {
   // STATIC:
-  private static var defaultAssetLibraries:Map<String, LimeAssetLibrary>;
+
+  static var defaultAssetLibraries:SafeMap<LimeAssetLibrary> = null;
 
   /**
    * Find all the registered access libraries and store keyed references to them
@@ -62,7 +72,7 @@ class LimeBackend implements IBackend
   {
     if (defaultAssetLibraries == null)
     {
-      defaultAssetLibraries = new Map<String, LimeAssetLibrary>();
+      defaultAssetLibraries = new SafeMap<LimeAssetLibrary>();
 
       // I don't like having to do this but there's no other way, hope the internals don't change!
       var libraries = @:privateAccess lime.utils.Assets.libraries;
@@ -383,6 +393,15 @@ class LimeBackend implements IBackend
       modLibrary.preloadImagesToCache();
     }
   }
+
+  public function preloadSoundsToCache():Void
+  {
+    // On HTML5, we need to call `loadAudioBuffer()` on all sounds before they can be later loaded synchronously.
+    for (modLibrary in modLibraries)
+    {
+      modLibrary.preloadSoundsToCache();
+    }
+  }
 }
 
 @:nullSafety
@@ -449,6 +468,11 @@ class LimeModLibrary extends LimeAssetLibrary
    * This doesn't break mods.
    */
   var imageCache:Map<String, lime.graphics.Image>;
+
+  /**
+   * Preload sounds on HTML5 to allow sounds to be load synchronously.
+   */
+  var soundCache:Map<String, AudioBuffer>;
   #end
 
   public function new(backend:LimeBackend, fallback:LimeAssetLibrary, pathPrefix:String = '', libraryId:String = 'default')
@@ -458,11 +482,16 @@ class LimeModLibrary extends LimeAssetLibrary
     this.pathPrefix = pathPrefix;
     this.libraryId = libraryId;
     this.fallback = fallback;
+    super();
+
     #if html5
     imageCache = new Map<String, lime.graphics.Image>();
-    // preloadImagesToCache();
+    @:nullSafety(Off)
+    preloadImagesToCache();
+    soundCache = new Map<String, AudioBuffer>();
+    @:nullSafety(Off)
+    preloadSoundsToCache();
     #end
-    super();
   }
 
   @:nullSafety(Off)
@@ -502,6 +531,23 @@ class LimeModLibrary extends LimeAssetLibrary
     }
   }
 
+  public function preloadSoundsToCache():Void
+  {
+    // On HTML5, we need to call `loadImage()` on all sounds before they can be later loaded synchronously.
+
+    for (soundAsset in this.list(AssetType.SOUND))
+    {
+      var symbol = new IdAndLibrary(soundAsset, this);
+      var filePath = p.file(symbol.modId);
+
+      #if html5
+      if (soundCache.exists(filePath)) continue;
+      #end
+
+      loadAudioBuffer(soundAsset);
+    }
+  }
+
   public override function getAsset(id:String, assetType:String):Null<Dynamic>
   {
     if (assetType == TEXT) return getText(id);
@@ -533,7 +579,7 @@ class LimeModLibrary extends LimeAssetLibrary
 
   /**
    * Returns true if the asset of the given id and type exists.
-       * Takes into account mods and locales, if available.
+   * Takes into account mods and locales, if available.
    */
   public override function exists(id:String, assetType:String):Bool
   {
@@ -600,6 +646,13 @@ class LimeModLibrary extends LimeAssetLibrary
     var symbol = new IdAndLibrary(id, this);
     if (p.check(symbol.modId))
     {
+      var filePath = p.file(symbol.modId);
+      #if html5
+      if (soundCache.exists(filePath))
+      {
+        return soundCache.get(filePath);
+      }
+      #end
       var buffer:AudioBuffer = AudioBuffer.fromFile(p.file(symbol.modId));
 
       if (buffer == null)
@@ -920,15 +973,26 @@ class LimeModLibrary extends LimeAssetLibrary
     var symbol = new IdAndLibrary(id, this);
     if (p.check(symbol.modId))
     {
-      var path = pathGroups.get(p.file(symbol.modId));
-      if (path != null)
+      // We load the bytes, then load the file, rather than using AudioBuffer.loadFromFile,
+      // because URLs don't work with MemoryFileSystem.
+
+      var filePath = p.file(symbol.modId);
+      var soundFuture = LimeAsyncHandler.loadBytesFromFileSystem(filePath, p.fileSystem).then((bytes:Bytes) ->
       {
-        return AudioBuffer.loadFromFiles(path);
-      }
-      else
+        return Future.withValue(AudioBuffer.fromBytes(bytes));
+      });
+
+      #if html5
+      soundFuture.onComplete((result:AudioBuffer) ->
       {
-        return AudioBuffer.loadFromFile(getPath(p.file(symbol.modId)) ?? p.file(symbol.modId));
-      }
+        if (result != null)
+        {
+          soundCache.set(filePath, result);
+        }
+      });
+      #end
+
+      return soundFuture;
     }
     else if ((fallback != null))
     {
@@ -982,14 +1046,11 @@ class LimeModLibrary extends LimeAssetLibrary
     else if ((fallback != null))
     {
       var localePath:Null<String> = p.fileLocale(id);
-      if (localePath != null && fallbackExists(localePath))
-      {
-        return fallback.loadText(localePath);
-      }
-      else
-      {
-        return fallback.loadText(id);
-      }
+
+      var base:Future<String> = (localePath != null && fallbackExists(localePath)) ? fallback.loadText(localePath) : fallback.loadText(id);
+      return base.then((text) -> {
+        return Future.withValue(p.mergeAndAppendText(id, text ?? ''));
+      });
     }
     var request = new HTTPRequest<String>();
     return request.load('');
@@ -1119,7 +1180,6 @@ class LimeModLibrary extends LimeAssetLibrary
       #end
     }
 
-    items = Util.filterUnique(items);
     return items;
   }
 
@@ -1253,7 +1313,7 @@ class LimeCoreLibrary extends LimeAssetLibrary
   #if html5
   /**
    * Preload images on HTML5 to allow images to be loaded synchronously.
-   * This doesn't break mods because a new
+   * This doesn't break mods
    */
   var imageCache:Map<String, lime.graphics.Image>;
   #end
@@ -1356,7 +1416,6 @@ class LimeCoreLibrary extends LimeAssetLibrary
       {
         font = #if openfl OpenFLFont #else Font #end.fromBytes(polymodLibrary.fileSystem.getFileBytes(redirectId));
       }
-
       #if openfl
       @:privateAccess if (!OpenFLFont.__fontByName.exists(font.name)) OpenFLFont.registerFont(font);
       #end
@@ -1425,9 +1484,9 @@ class LimeCoreLibrary extends LimeAssetLibrary
     if (polymodLibrary.fileSystem.exists(redirectId))
     {
       #if (js && html5)
-      return Font.loadFromName(getPath(redirectId));
+      return Font.loadFromName(redirectId);
       #else
-      return Font.loadFromFile(getPath(redirectId));
+      return Font.loadFromFile(redirectId);
       #end
     }
 
@@ -1439,15 +1498,11 @@ class LimeCoreLibrary extends LimeAssetLibrary
     var redirectId:String = buildRedirectId(id);
     if (polymodLibrary.fileSystem.exists(redirectId))
     {
-      #if (js && html5)
-      // We load the bytes, then load the file, rather than using Image.loadFromFile,
-      // because URLs don't work with MemoryFileSystem.
-      var dabytes = polymodLibrary.fileSystem.getFileBytes(redirectId);
-      var imageFuture = Image.loadFromBytes(dabytes);
+      var bytesFuture = polymodLibrary.fileSystem.loadFileBytes(redirectId);
+      var imageFuture = bytesFuture.then((bytes:Bytes) -> {
+        return Image.loadFromBytes(bytes);
+      });
       return imageFuture;
-      #else
-      return Image.loadFromFile(redirectId);
-      #end
     }
 
     return fallback.loadImage(id);
@@ -1458,7 +1513,11 @@ class LimeCoreLibrary extends LimeAssetLibrary
     var redirectId:String = buildRedirectId(id);
     if (polymodLibrary.fileSystem.exists(redirectId))
     {
-      return AudioBuffer.loadFromFile(redirectId);
+      var bytesFuture = polymodLibrary.fileSystem.loadFileBytes(redirectId);
+      var audioBufferFuture = bytesFuture.then((bytes:Bytes) -> {
+        return Future.withValue(AudioBuffer.fromBytes(bytes));
+      });
+      return audioBufferFuture;
     }
 
     return fallback.loadAudioBuffer(id);
@@ -1469,14 +1528,11 @@ class LimeCoreLibrary extends LimeAssetLibrary
     var redirectId:String = buildRedirectId(id);
     if (polymodLibrary.fileSystem.exists(redirectId))
     {
-      var request = new HTTPRequest<String>();
-      return request.load(redirectId).then((modText) -> {
-        if (modText != null)
-        {
-          modText = polymodLibrary.mergeAndAppendText(id, modText);
-        }
-        return Future.withValue(modText);
+      var bytesFuture = polymodLibrary.fileSystem.loadFileBytes(redirectId);
+      var textFuture = bytesFuture.then((bytes:Bytes) -> {
+        return Future.withValue(bytes.toString());
       });
+      return textFuture;
     }
 
     return fallback.loadText(id);

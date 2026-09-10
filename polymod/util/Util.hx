@@ -11,6 +11,8 @@ import polymod.hscript._internal.Expr;
 import unifill.Unifill;
 #end
 
+using StringTools;
+
 class Util
 {
   /**
@@ -45,11 +47,13 @@ class Util
 
     for (modId in modIds)
     {
-      if (fileSystem.exists(pathMerge(id, modId)))
+      var modDir = fileSystem.scanModDirectoriesForId(modId);
+
+      if (fileSystem.exists(pathMerge(id, modDir)))
       {
         text = mergeText(text, id, modId, getModText, parseRules);
       }
-      if (fileSystem.exists(pathAppend(id, modId)))
+      if (fileSystem.exists(pathAppend(id, modDir)))
       {
         text = appendText(text, id, modId, getModText, parseRules);
       }
@@ -93,12 +97,7 @@ class Util
     id = stripPrefix(id);
     var mergeFile = PolymodConfig.mergeFolder + sl() + id;
     // try the path first
-    var format:BaseParseFormat = parseRules.get(id);
-    if (format == null)
-    {
-      // try the extension then
-      format = parseRules.get(extension);
-    }
+    var format:BaseParseFormat = parseRules.get(id) ?? parseRules.get(extension);
     if (format != null)
     {
       var mergeText = getModText(mergeFile, modId);
@@ -117,12 +116,7 @@ class Util
     var extension = uExtension(id, true);
     id = stripPrefix(id);
     // try the path first
-    var format:BaseParseFormat = parseRules.get(id);
-    if (format == null)
-    {
-      // try the extension then
-      format = parseRules.get(extension);
-    }
+    var format:BaseParseFormat = parseRules.get(id) ?? parseRules.get(extension);
     if (format != null)
     {
       var appendText = getModText(Util.pathJoin(PolymodConfig.appendFolder, id), modId);
@@ -292,23 +286,32 @@ class Util
     return txt;
   }
 
-  public static inline function pathMerge(id:String, theDir:String = ''):String
+  public static inline function pathMerge(id:String, modDir:String = ''):String
   {
-    return pathSpecial(id, PolymodConfig.mergeFolder, theDir);
+    return appendPrefix(pathSpecial(id, PolymodConfig.mergeFolder, modDir), withTrailingSlash(Path.normalize(Polymod.modRoot)));
   }
 
-  private static inline function pathAppend(id:String, theDir:String = ''):String
+  private static inline function pathAppend(id:String, modDir:String = ''):String
   {
-    return pathSpecial(id, PolymodConfig.appendFolder, theDir);
+    return appendPrefix(pathSpecial(id, PolymodConfig.appendFolder, modDir), withTrailingSlash(Path.normalize(Polymod.modRoot)));
   }
 
   public static inline function stripPrefix(id:String, prefix:String = 'assets/'):String
   {
-    if (uIndexOf(id, prefix) == 0)
+    if (id.startsWith(prefix))
     {
-      id = uSubstring(id, 7);
+      return uSubstr(id, prefix.length);
     }
     return id;
+  }
+
+  public static inline function appendPrefix(id:String, prefix:String = 'assets/'):String
+  {
+    if (id.startsWith(prefix))
+    {
+      return id;
+    }
+    return prefix + id;
   }
 
   public static function pathSpecial(id:String, special:String = '', theDir:String = ''):String
@@ -363,6 +366,7 @@ class Util
     return '/';
   }
 
+  @:access(haxe.xml.Xml)
   public static inline function copyXml(data:Xml, parent:Xml = null):Xml
   {
     var c:Xml = null;
@@ -491,8 +495,7 @@ class Util
 
   public static function uExtension(str:String, lowerCase:Bool = false):String
   {
-    var i = uLastIndexOf(str, '.');
-    var extension = uSubstr(str, i + 1, uLength(str) - (i + 1));
+    var extension = Path.extension(str);
     if (lowerCase)
     {
       extension = extension.toLowerCase();
@@ -666,20 +669,45 @@ class Util
     return output;
   }
 
-  public static function indexOfInsens(arr:Array<String>, x:String, ?fromIndex:Int, ignoreConfig:Bool = false):Int
+  /**
+   * Traverses an `Array<String>` while ignoring case, returning the first occurrence of `x`.
+   * This function respects the value of `PolymodConfig.caseInsensitiveZipLoading`, unless `ignoreConfig` is true,
+   * where it will always act like `indexOf` instead.
+   * @param arr The string array to traverse.
+   * @param x The string to search for, disregarding case.
+   * @param fromIndex If specified, the search will begin from that index. See the base array equivalent for more details.
+   * @return An `Int`, representing the first occurrence of `x` in the array. Will be -1 if not found.
+   */
+  public static function indexOfInsens(arr:Array<String>, x:String, ?fromIndex:Int):Int
   {
-    if (!PolymodConfig.caseInsensitiveZipLoading && !ignoreConfig) return arr.indexOf(x, fromIndex);
-    x = x.toLowerCase();
-    for (i => s in arr)
+    if (arr.length == 0) return -1;
+    if (!PolymodConfig.caseInsensitiveZipLoading) return arr.indexOf(x, fromIndex);
+
+    var i:Int = fromIndex ?? 0;
+    if (i < 0)
     {
-      if (s.toLowerCase() == x) return i;
+      i += arr.length;
+      if (i < 0) i = 0;
+    }
+    x = x.toLowerCase();
+    while (i < arr.length)
+    {
+      if (arr[i].toLowerCase() == x) return i;
+      i++;
     }
     return -1;
   }
 
-  public static inline function containsInsens(arr:Array<String>, x:String, ignoreConfig:Bool = false):Bool
+  /**
+   * A shortcut for `indexOfInsens(...) != -1`, acting as an case-insensitive string existence check.
+   * @param arr The string array to traverse.
+   * @param x The string to search, disregarding case.
+   * @param ignoreConfig Whether to ignore the value of `Polymod.caseInsensitiveZipLoading`.
+   * @return A `Bool`, representing whether `x` is present in the array.
+   */
+  public static inline function containsInsens(arr:Array<String>, x:String):Bool
   {
-    return indexOfInsens(arr, x, ignoreConfig) != -1;
+    return indexOfInsens(arr, x) != -1;
   }
 
   public static function fetchCallStack(exception:Bool = true):String {
@@ -706,6 +734,23 @@ class Util
     }
 
     return errorMessage;
+  }
+
+  public static function getSuperClasses(obj:Dynamic):Array<String>
+  {
+    var cls = Type.getClass(obj) ?? Type.resolveClass(getTypeNameOf(obj));
+    if (cls == null) return [];
+
+    var superCls:Dynamic = Type.getSuperClass(cls);
+    if (superCls == null) return [];
+
+    var superClassList:Array<String> = [];
+    while (superCls != null)
+    {
+      superClassList.push(Type.getClassName(superCls));
+      superCls = Type.getSuperClass(superCls);
+    }
+    return superClassList;
   }
 
   public static function getTypeNameOf(obj:Dynamic):String
@@ -742,6 +787,20 @@ class Util
    */
   public static function getFullClassName(clsDecl:ClassDecl):String
   {
-    return (clsDecl.pkg != null ? (clsDecl.pkg.join(".") + ".") : "") + clsDecl.name;
+    if (clsDecl.pkg != null && clsDecl.pkg.length > 0)
+    {
+      return clsDecl.pkg.join('.') + '.' + clsDecl.name;
+    }
+    return clsDecl.name;
+  }
+
+  /**
+   * Retrieves the full qualified name for a scripted enum declaration.
+   * @param enumDecl The enum declaration.
+   * @return String
+   */
+  public static function getFullEnumClass(enumDecl:EnumDecl):String
+  {
+    return enumDecl.pkg != null ? '${enumDecl.pkg.join('.')}.${enumDecl}' : enumDecl.name;
   }
 }

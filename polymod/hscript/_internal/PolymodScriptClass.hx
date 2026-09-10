@@ -1,6 +1,7 @@
 package polymod.hscript._internal;
 
 import haxe.ds.ObjectMap;
+import polymod.hscript._internal.Expr.EnumDecl;
 import polymod.hscript._internal.Expr.ClassDecl;
 import polymod.hscript._internal.Expr.ClassImport;
 import polymod.hscript._internal.Expr.FieldDecl;
@@ -49,6 +50,171 @@ class PolymodScriptClass
    */
   public static final blacklistedInstanceFields:Map<String, Array<String>> = new Map<String, Array<String>>();
 
+  /**
+   * Field names that may not be reached even through a receiver whose type is not known.
+   */
+  public static final blacklistedDynamicFieldNames:Map<String, Bool> = new Map<String, Bool>();
+
+  /**
+   * Bumped whenever a blacklist changes, so anything caching a lookup can tell it went stale.
+   */
+  public static var blacklistGeneration(default, null):Int = 0;
+
+  /**
+   * `blacklistedStaticFields` re-keyed by class name, since a compiled script only knows names.
+   */
+  static var staticFieldsByNameCache:Null<Map<String, Array<String>>> = null;
+
+  /**
+   * Class name to every blacklisted instance field it has, inherited ones included.
+   */
+  static var resolvedInstanceFields:Map<String, Array<String>> = new Map<String, Array<String>>();
+
+  /**
+   * Throw away everything derived from the blacklists. Call after changing one.
+   */
+  public static function bumpBlacklistGeneration():Void
+  {
+    blacklistGeneration++;
+    staticFieldsByNameCache = null;
+    resolvedInstanceFields.clear();
+  }
+
+  /**
+   * The blacklisted static fields, keyed by class name instead of by class.
+   */
+  public static function staticFieldsByName():Map<String, Array<String>>
+  {
+    if (staticFieldsByNameCache != null) return staticFieldsByNameCache;
+
+    var result:Map<String, Array<String>> = new Map<String, Array<String>>();
+
+    for (cls in blacklistedStaticFields.keys())
+    {
+      var name:Null<String> = null;
+      try
+      {
+        name = Type.getClassName(cls);
+      }
+      catch (_:Dynamic) {}
+
+      if (name == null) continue;
+      result.set(name, blacklistedStaticFields.get(cls));
+    }
+
+    staticFieldsByNameCache = result;
+    return result;
+  }
+
+  /**
+   * Every name an instance of this class could be blacklisted under, itself first.
+   */
+  static function ancestorsOf(clsName:String):Array<String>
+  {
+    var result:Array<String> = [clsName];
+
+    var cls:Null<Class<Dynamic>> = null;
+    try
+    {
+      cls = Type.resolveClass(clsName);
+    }
+    catch (_:Dynamic) {}
+
+    // A hand written script could name a class that is its own super, so do not trust the chain.
+    var depth:Int = 0;
+    while (cls != null && depth++ < 64)
+    {
+      try
+      {
+        cls = Type.getSuperClass(cls);
+      }
+      catch (_:Dynamic)
+      {
+        break;
+      }
+
+      if (cls == null) break;
+
+      var name:Null<String> = Type.getClassName(cls);
+      if (name == null || result.contains(name)) break;
+
+      result.push(name);
+    }
+
+    return result;
+  }
+
+  /**
+   * Every blacklisted instance field reachable on this class.
+   */
+  public static function blacklistedInstanceFieldsOf(clsName:String):Array<String>
+  {
+    var cached:Null<Array<String>> = resolvedInstanceFields.get(clsName);
+    if (cached != null) return cached;
+
+    var result:Array<String> = [];
+
+    for (name in ancestorsOf(clsName))
+    {
+      var fields:Null<Array<String>> = blacklistedInstanceFields.get(name);
+      if (fields == null) continue;
+
+      for (field in fields)
+        if (!result.contains(field)) result.push(field);
+    }
+
+    resolvedInstanceFields.set(clsName, result);
+    return result;
+  }
+
+  /**
+   * Whether this field is blacklisted on this exact class, ignoring what it inherits.
+   */
+  public static function isBlacklistedFieldExact(clsName:String, field:String):Bool
+  {
+    if (clsName == null || clsName.length == 0) return false;
+
+    var statics:Null<Array<String>> = staticFieldsByName().get(clsName);
+    if (statics != null && statics.contains(field)) return true;
+
+    var fields:Null<Array<String>> = blacklistedInstanceFields.get(clsName);
+    return fields != null && fields.contains(field);
+  }
+
+  /**
+   * Whether this field is blacklisted on this class or on anything it extends.
+   */
+  public static function isBlacklistedField(clsName:String, field:String):Bool
+  {
+    if (clsName == null || clsName.length == 0) return false;
+
+    var statics:Null<Array<String>> = staticFieldsByName().get(clsName);
+    if (statics != null && statics.contains(field)) return true;
+
+    return blacklistedInstanceFieldsOf(clsName).contains(field);
+  }
+
+  /**
+   * Every field name any blacklist mentions.
+   */
+  public static function blacklistedFieldNames():Map<String, Bool>
+  {
+    var result:Map<String, Bool> = new Map<String, Bool>();
+
+    for (fields in staticFieldsByName())
+      for (field in fields)
+        result.set(field, true);
+
+    for (fields in blacklistedInstanceFields)
+      for (field in fields)
+        result.set(field, true);
+
+    for (field in blacklistedDynamicFieldNames.keys())
+      result.set(field, true);
+
+    return result;
+  }
+
   /*
    * STATIC METHODS
    */
@@ -63,31 +229,6 @@ class PolymodScriptClass
   /**
    * STATIC PROPERTIES
    */
-  /**
-   * Define a list of script classes to override the default behavior of Polymod.
-   * For example, script classes should import `ScriptedSprite` instead of `Sprite`.
-   */
-  public static var scriptClassOverrides(get, never):Map<String, Class<Dynamic>>;
-
-  static var _scriptClassOverrides:Map<String, Class<Dynamic>> = null;
-
-  static function get_scriptClassOverrides():Map<String, Class<Dynamic>>
-  {
-    if (_scriptClassOverrides == null)
-    {
-      _scriptClassOverrides = new Map<String, Class<Dynamic>>();
-
-      var baseScriptClassOverrides:Map<String, Class<Dynamic>> = PolymodScriptClassMacro.listHScriptedClasses();
-
-      for (key => value in baseScriptClassOverrides)
-      {
-        _scriptClassOverrides.set(key, value);
-      }
-    }
-
-    return _scriptClassOverrides;
-  }
-
   /**
    * Define a list of all the abstracts we have available at compile time,
    * and map them to internal implementation classes.
@@ -145,24 +286,79 @@ class PolymodScriptClass
     return _typedefs;
   }
 
+  static var _baseClassesByPackage:Map<String, Array<String>>;
+
+  /**
+   * Defines a list of classes that each package contains.
+   * Compiled at runtime through a macro to then be stored here.
+   */
+  public static var baseClassesByPackage(get, never):Map<String, Array<String>>;
+
+  static function get_baseClassesByPackage():Map<String, Array<String>>
+  {
+    if (_baseClassesByPackage == null)
+    {
+      _baseClassesByPackage = new Map<String, Array<String>>();
+      for (pkg => cls in PolymodScriptClassMacro.listPackagesList())
+      {
+        _baseClassesByPackage.set(pkg, cls);
+      }
+    }
+    return _baseClassesByPackage;
+  }
+
+  static var _scriptClassesByPackage:Map<String, Array<String>>;
+
+  /**
+   * Defines a list of scripted classes that each package contains.
+   * Reset everytime scripts are re-registered.
+   */
+  public static var scriptClassesByPackage(get, never):Map<String, Array<String>>;
+
+  static function get_scriptClassesByPackage():Map<String, Array<String>>
+  {
+    if (_scriptClassesByPackage == null)
+    {
+      _scriptClassesByPackage = new Map<String, Array<String>>();
+
+      for (cls in Interp._scriptClassDescriptors)
+      {
+        if (cls.pkg == null || cls.pkg.length == 0) continue;
+
+        var pack:String = cls.pkg.join('.');
+        var list:Array<String> = _scriptClassesByPackage.get(pack) ?? [];
+        var fullPath:String = Util.getFullClassName(cls);
+
+        if (!list.contains(fullPath))
+          list.push(fullPath);
+
+        _scriptClassesByPackage.set(cls.pkg.join('.'), list);
+      }
+    }
+    return _scriptClassesByPackage;
+  }
+
   /**
    * Register a scripted class by retrieving the script from the given path.
+   *
+   * @return `true` if the script was registered successfully, otherwise `false`.
    */
-  static function registerScriptClassByPath(path:String):Void
+  static function registerScriptClassByPath(path:String):Bool
   {
     var scriptBody = Polymod.assetLibrary.getText(path);
     if (scriptBody == null)
     {
       Polymod.error(SCRIPT_PARSE_FAILED, 'Error while loading script "${path}", could not retrieve script contents!', SCRIPT_RUNTIME);
-      return;
+      return false;
     }
     try
     {
       registerScriptClassByString(scriptBody, path);
+      return true;
     }
     catch (err:Expr.Error)
     {
-      var errLine:String = #if hscriptPos '${err.line}' #else "#???" #end;
+      var errLine:String = #if hscriptPos '${err.line}' #else '#???' #end;
       #if hscriptPos
       switch (err.e)
       #else
@@ -173,11 +369,19 @@ class PolymodScriptClass
           Polymod.error(SCRIPT_PARSE_FAILED,
             'Error while parsing function ${path}#${errLine}: EUnexpected' + '\n' + 'Unexpected token "${s}", is there invalid syntax on this line?',
             SCRIPT_RUNTIME);
+          return false;
         case EClassUnresolvedSuperclass(cls, reason):
           Polymod.error(SCRIPT_PARSE_FAILED,
             'Error while parsing class ${path}#${errLine}: EClassUnresolvedSuperclass' + '\n' + 'Unresolved superclass "${cls}", ${reason}', SCRIPT_RUNTIME);
+          return false;
+        case EInvalidAccessorCombination(accessors):
+          Polymod.error(
+            SCRIPT_PARSE_FAILED,
+            'Error while parsing function ${path}#${errLine}: EInvalidAccessorCombination' + '\n' + 'Invalid modifier combination: ${accessors.join(' + ')}', SCRIPT_RUNTIME);
+            return false;
         default:
           Polymod.error(SCRIPT_PARSE_FAILED, 'Error while parsing script ${path}#${errLine}: ' + '\n' + 'An unknown error occurred: ${err}', SCRIPT_RUNTIME);
+          return false;
       }
     }
   }
@@ -196,7 +400,7 @@ class PolymodScriptClass
     Polymod.assetLibrary.loadText(path).onComplete((text) -> {
       try
       {
-        registerScriptClassByString(text);
+        registerScriptClassByString(text, path);
         promise.complete(true);
       }
       catch (err:Expr.Error)
@@ -219,7 +423,7 @@ class PolymodScriptClass
         promise.error(err);
       }
     }).onError((err) -> {
-      if (err == "404")
+      if (err == '404')
       {
         Polymod.error(SCRIPT_PARSE_FAILED, 'Error while loading script "${path}", could not retrieve script contents (404 error)!', SCRIPT_RUNTIME);
       }
@@ -265,9 +469,20 @@ class PolymodScriptClass
   public static function listScriptClassesExtending(clsPath:String):Array<String>
   {
     var result = [];
+
+    #if POLYMOD_CPPIA
+    // Do CPPIA first!
+    for (key in PolymodCppiaClassReference.listCppiaClassesExtending(clsPath))
+    {
+      result.push(key);
+    }
+    #end
+
     @:privateAccess
     for (key => value in Interp._scriptClassDescriptors)
     {
+      if (result.indexOf(key) != -1) continue;
+
       var superClasses = getSuperClasses(value);
       if (superClasses.indexOf(clsPath) != -1)
       {
@@ -378,6 +593,11 @@ class PolymodScriptClass
     return scriptInterp.callScriptClassStaticFunction(clsName, funcName, args);
   }
 
+  public static function hasScriptClassStaticField(clsName:String, funcName:String):Bool
+  {
+    return scriptInterp.hasScriptClassStaticField(clsName, funcName);
+  }
+
   public static function hasScriptClassStaticFunction(clsName:String, funcName:String):Bool
   {
     return scriptInterp.hasScriptClassStaticFunction(clsName, funcName);
@@ -392,6 +612,75 @@ class PolymodScriptClass
   {
     return scriptInterp.setScriptClassStaticField(clsName, fieldName, fieldValue);
   }
+
+  // Override version of Std.isOfType so we're able to test for scripted classes.
+  public static function isOfType(v:Dynamic, t:Dynamic):Bool
+  {
+    if (t is String && Interp._scriptEnumDescriptors.exists(t))
+    {
+      if (v is PolymodEnum)
+      {
+        var enumDecl:EnumDecl = v._e;
+
+        return Util.getFullEnumClass(enumDecl) == t;
+      }
+      return false;
+    }
+
+    var typeClassDecl:ClassDecl = null;
+    var typeFullName:String = '';
+    if (t is PolymodStaticClassReference)
+    {
+      var o = cast(t, PolymodStaticClassReference);
+      typeClassDecl = o.cls;
+      typeFullName = Util.getFullClassName(typeClassDecl);
+    }
+    else
+    {
+      typeFullName = Util.getTypeNameOf(t);
+    }
+
+    // Check again for a class descriptor just in case.
+    // We check for the full package name in case the scripted class was packaged.
+    if (typeClassDecl == null)
+    {
+      var typeNameSplit:Array<String> = typeFullName.split('.');
+      var typeName:String = typeNameSplit.length < 1 ? typeFullName : typeNameSplit[typeNameSplit.length - 1];
+
+      typeClassDecl = Interp.findScriptClassDescriptor(typeFullName) ?? Interp.findScriptClassDescriptor(typeName) ?? null;
+      if (typeClassDecl != null)
+      {
+        // Re-assign full package.
+        typeFullName = Util.getFullClassName(typeClassDecl);
+      }
+    }
+
+    // `v` can be a PolymodScriptClass if you call `this` from a scripted class.
+    if (v is HScriptedClass || v is PolymodStaticClassReference || v is PolymodScriptClass)
+    {
+      var proxy:PolymodAbstractScriptClass = switch (v)
+      {
+        case (_ is HScriptedClass) => true: v._asc;
+        case (_ is PolymodStaticClassReference) => true: v.cls;
+        default: cast v;
+      }
+      var allPackages:Array<String> = [proxy.fullyQualifiedName].concat(getSuperClasses(proxy._c));
+
+      // Check whether the base class or any super classes are the same type as the type class.
+      return allPackages.indexOf(typeFullName) != -1;
+    }
+
+    // If we're on this line then it means `v` isn't a scripted class and `t` is instead.
+    // We can safely return false since source classes won't be able to extend scripted classes anyway.
+    if (typeClassDecl != null)
+    {
+      return false;
+    }
+
+    // Fallback to using the regular Std.isOfType
+    return #if (haxe_ver >= 4.2) Std.isOfType #else Std.is #end (v, t);
+  }
+
 
   /**
    * INSTANCE METHODS
@@ -409,10 +698,20 @@ class PolymodScriptClass
         {
           targetClass = null;
         }
-        else if (scriptClassOverrides.exists(clsPath))
+        #if POLYMOD_CPPIA
+        else if (PolymodCppiaClassReference.hasCppiaClass(clsPath))
         {
-          targetClass = scriptClassOverrides.get(clsPath);
+          if (!PolymodCppiaClassReference.isExtendableCppiaClass(clsPath))
+          {
+            Polymod.error(SCRIPT_PARSE_FAILED,
+              'Cannot extend compiled class ("${Util.getFullClassName(c)}" tried extending "$clsPath"). Mark it with @:hscriptExtendable and rebuild the compiled script.',
+              SCRIPT_RUNTIME);
+            return;
+          }
+
+          targetClass = PolymodCppiaClassReference.getCppiaClass(clsPath);
         }
+        #end
         else if (c.imports.exists(clsName))
         {
           var importedClass:ClassImport = c.imports.get(clsName);
@@ -465,6 +764,9 @@ class PolymodScriptClass
     {
       createSuperClass(args);
     }
+    _constructorArgs = args;
+
+    validateClassFields();
   }
 
   var __superClassFieldList:Array<String> = null;
@@ -495,6 +797,11 @@ class PolymodScriptClass
       __superClassFieldList = __superClassFieldList.concat(Type.getInstanceFields(Type.getClass(_superClass)));
     }
     return __superClassFieldList.indexOf(name) != -1;
+  }
+
+  public function getConstructorArgs():Array<Dynamic>
+  {
+    return _constructorArgs;
   }
 
   private function createSuperClass(args:Array<Dynamic> = null)
@@ -531,16 +838,19 @@ class PolymodScriptClass
     {
       var clsToCreate:Class<Dynamic> = null;
 
-      if (scriptClassOverrides.exists(fullExtendString))
+      #if POLYMOD_CPPIA
+      if (PolymodCppiaClassReference.hasCppiaClass(fullExtendString))
       {
-        clsToCreate = scriptClassOverrides.get(fullExtendString);
+        clsToCreate = PolymodCppiaClassReference.getCppiaClass(fullExtendString);
 
         if (clsToCreate == null)
         {
-          _interp.error(EClassUnresolvedSuperclass(fullExtendString, 'WHY?'));
+          _interp.error(EClassUnresolvedSuperclass(fullExtendString, 'no loaded compiled script provides it'));
         }
       }
-      else if (_c.imports.exists(extendString))
+      else
+      #end
+      if (_c.imports.exists(extendString))
       {
         clsToCreate = _c.imports.get(extendString).cls;
 
@@ -556,8 +866,10 @@ class PolymodScriptClass
 
       superClass = Type.createInstance(clsToCreate, args);
     }
+  }
 
-    // Throw an error if the script class has an instance field with the same name as one from the super class.
+  private function validateClassFields():Void
+  {
     for (f in _c.fields)
     {
       switch (f.kind)
@@ -565,10 +877,39 @@ class PolymodScriptClass
         case KVar(v):
           if (!f.access.contains(AStatic) && superHasField(f.name))
           {
-            throw 'Redefinition of variable "${f.name}" from superclass not allowed';
+            // Throw an error if the script class has an instance field with the same name as one from the super class.
+            throw 'Redefinition of variable "${f.name}" from superclass not allowed.';
           }
+        case KFunction(fn):
+          #if POLYMOD_STRICT_SYNTAX
+          if (f.access.contains(AOverride) && !superHasField(f.name))
+          {
+            // Throw an error if a function is declared overwritten but isn't overriding anything.
+            throw "Field " + f.name + " is declared 'override' but doesn't override any field.";
+          }
+          else if (!f.access.contains(AOverride) && superHasField(f.name))
+          {
+            var superClassPackage:String = '';
+            if (superClass is PolymodScriptClass)
+            {
+              superClassPackage = Util.getFullClassName((cast superClass : PolymodScriptClass)._c);
+            }
+            else
+            {
+              // TODO: Fetch entire package name?
+              superClassPackage = Util.getTypeNameOf(superClass);
+            }
 
-        case _:
+            // Throw an error if a function is overriden but doesn't have the override accessor.
+            throw "Field " + f.name + " should be declared with 'override' since it is inherited from superclass " + superClassPackage + '.';
+          }
+          else if (f.access.contains(AOverride) && superClass == null)
+          {
+            // Throw an error if the override accessor is used with no super class.
+            throw "Invalid modifier: override on field" + f.name + " of class that has no parent.";
+          }
+          #end
+        default:
       }
     }
   }
@@ -676,7 +1017,8 @@ class PolymodScriptClass
         }
       });
 
-      return Reflect.callMethod(superClass, fn, fixedArgs);
+      // OVERRIDE CHANGE: Make sure to call the `scriptCallSuper` function instead of using Reflect to prevent recursion.
+      return this.superClass.scriptCallSuper(fnName, fixedArgs);
     }
   }
 
@@ -773,10 +1115,7 @@ class PolymodScriptClass
       return func;
     }
 
-    // OVERRIDE CHANGE: Use __super_ when calling superclass
-    var fixedName = '__super_${name}';
-
-    var func = Reflect.field(superClass, fixedName);
+    var func = Reflect.field(superClass, name);
     if (func == null) return null;
     _cachedSuperFunctionDecls.set(name, func);
     return func;
@@ -796,6 +1135,7 @@ class PolymodScriptClass
     if (_cachedFunctionDecls != null)
     {
       _cachedFunctionDecls.remove(name);
+      _cachedFunctionCalls.remove(name);
     }
   }
 
@@ -861,9 +1201,12 @@ class PolymodScriptClass
     return _cachedFunctionDecls;
   }
 
+  private final _constructorArgs:Array<Dynamic>;
+
   private var _cachedFieldDecls:Map<String, FieldDecl> = [];
   private var _cachedSuperFunctionDecls:Map<String, Dynamic> = [];
   private var _cachedFunctionDecls:Map<String, FunctionDecl> = [];
+  private var _cachedFunctionCalls:Map<String, Dynamic> = [];
   private var _cachedVarDecls:Map<String, VarDecl> = [];
   private var _cachedUsingFunctions:Map<String, Array<Dynamic>->Dynamic> = [];
 
@@ -872,6 +1215,7 @@ class PolymodScriptClass
     _cachedFieldDecls.clear();
     _cachedSuperFunctionDecls.clear();
     _cachedFunctionDecls.clear();
+    _cachedFunctionCalls.clear();
     _cachedVarDecls.clear();
     _cachedUsingFunctions.clear();
 
@@ -889,6 +1233,10 @@ class PolymodScriptClass
       {
         case KFunction(fn):
           _cachedFunctionDecls.set(f.name, fn);
+          _cachedFunctionCalls.set(f.name, Reflect.makeVarArgs(function(args:Array<Dynamic>)
+          {
+            return callFunction(f.name, args);
+          }));
         case KVar(v):
           _cachedVarDecls.set(f.name, v);
           if (v.expr != null)
@@ -931,19 +1279,47 @@ class PolymodScriptClass
   {
     for (_ => u in clsDecl.usings)
     {
-      var fields = Type.getClassFields(u.cls);
-      if (fields.length == 0) continue;
-
-      for (fld in fields)
+      if (u.cls != null)
       {
-        var field:Dynamic = Reflect.getProperty(u.cls, fld);
-        if (!Reflect.isFunction(field)) continue;
+        var fields = Type.getClassFields(u.cls);
+        if (fields.length == 0) continue;
 
-        var func:Dynamic = function(params:Array<Dynamic>) {
-          return Reflect.callMethod(u.cls, field, params);
+        for (fld in fields)
+        {
+          var field:Dynamic = Reflect.getProperty(u.cls, fld);
+          if (!Reflect.isFunction(field)) continue;
+
+          var func:Dynamic = function(params:Array<Dynamic>)
+          {
+            return Reflect.callMethod(u.cls, field, params);
+          };
+
+          usingCache.set(fld, func);
         }
+      }
+      else if (Interp._scriptClassDescriptors.exists(u.fullPath))
+      {
+        var scriptDecl = Interp._scriptClassDescriptors.get(u.fullPath);
 
-        usingCache.set(fld, func);
+        for (fld in scriptDecl.staticFields)
+        {
+          if (!fld.access.contains(AStatic)) continue;
+
+          switch (fld.kind)
+          {
+            case KFunction(f):
+              var fldName = fld.name;
+
+              var func:Dynamic = function(params:Array<Dynamic>) {
+                return callScriptClassStaticFunction(u.fullPath, fldName, params);
+              };
+
+              usingCache.set(fldName, func);
+
+            default:
+              //do nothing
+          }
+        }
       }
     }
   }

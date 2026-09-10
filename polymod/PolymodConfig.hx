@@ -83,17 +83,33 @@ class PolymodConfig
    * The file extension for scripted class files.
    *
    * Set this option by setting the `POLYMOD_SCRIPT_CLASS_EXT` Haxe define at compile time,
-   * or by setting this value in your code.
+   * or by setting this value in your code. You can provide multiple values by separating them with commas.
    *
-   * @default `.hxc`
+   * @default `.hxc,.hx`
    */
   public static var scriptClassExt(get, default):Array<String>;
 
   static function get_scriptClassExt():Array<String>
   {
     // If the value is null, retrieve the value as a Haxe define.
-    if (scriptClassExt == null) scriptClassExt = DefineUtil.getDefineStringArray('POLYMOD_SCRIPT_CLASS_EXT', [".hxc", ".hx"]);
+    if (scriptClassExt == null) scriptClassExt = DefineUtil.getDefineStringArray('POLYMOD_SCRIPT_CLASS_EXT', ['.hxc', '.hx']);
     return scriptClassExt;
+  }
+
+  /**
+   * The file extension for compiled (cppia) scripted class files.
+   *
+   * Set this option by setting the `POLYMOD_CPPIA_CLASS_EXT` Haxe define at compile time,
+   * or by setting this value in your code. You can provide multiple values by separating them with commas.
+   *
+   * @default `.cppia`
+   */
+  public static var cppiaClassExt(get, default):Array<String>;
+
+  static function get_cppiaClassExt():Array<String>
+  {
+    if (cppiaClassExt == null) cppiaClassExt = DefineUtil.getDefineStringArray('POLYMOD_CPPIA_CLASS_EXT', ['.cppia']);
+    return cppiaClassExt;
   }
 
   /**
@@ -149,24 +165,6 @@ class PolymodConfig
   }
 
   /**
-   * The file where Polymod checks for modpack definitions.
-   *
-   * Set this option by setting the `POLYMOD_MOD_PACK_FILE` Haxe define at compile time,
-   * or by setting this value in your code.
-   *
-   * @default `_polymod_pack.txt`
-   */
-  // @:deprecated("Functionality removed, new implementation pending")
-  public static var modPackFile(get, default):String;
-
-  static function get_modPackFile():String
-  {
-    // If the value is null, retrieve the value as a Haxe define.
-    if (modPackFile == null) modPackFile = DefineUtil.getDefineString('POLYMOD_MOD_PACK_FILE', '_polymod_pack.txt');
-    return modPackFile;
-  }
-
-  /**
    * The file where Polymod checks for mod metadata.
    *
    * Set this option by setting the `POLYMOD_MOD_METADATA_FILE` Haxe define at compile time,
@@ -189,14 +187,16 @@ class PolymodConfig
    * Set this option by setting the `POLYMOD_MOD_ICON_FILE` Haxe define at compile time,
    * or by setting this value in your code.
    *
+   * NOTE: You can specify multiple files to check separated with commas. If multiple exist, the first one in the list takes priority.
+   *
    * @default `_polymod_icon.png`
    */
-  public static var modIconFile(get, default):String;
+  public static var modIconFile(get, default):Array<String>;
 
-  static function get_modIconFile():String
+  static function get_modIconFile():Array<String>
   {
     // If the value is null, retrieve the value as a Haxe define.
-    if (modIconFile == null) modIconFile = DefineUtil.getDefineString('POLYMOD_MOD_ICON_FILE', '_polymod_icon.png');
+    if (modIconFile == null) modIconFile = DefineUtil.getDefineStringArray('POLYMOD_MOD_ICON_FILE', ['_polymod_icon.png']);
     return modIconFile;
   }
 
@@ -214,8 +214,11 @@ class PolymodConfig
   static function get_modIgnoreFiles():Array<String>
   {
     // If the value is null, retrieve the value as a Haxe define.
-    if (modIgnoreFiles == null) modIgnoreFiles = DefineUtil.getDefineStringArray('POLYMOD_MOD_IGNORE',
-      ['LICENSE.txt', 'ASSET_LICENSE.txt', 'CODE_LICENSE.txt']);
+    if (modIgnoreFiles == null)
+    {
+      modIgnoreFiles = DefineUtil.getDefineStringArray('POLYMOD_MOD_IGNORE',
+        ['LICENSE.txt', 'ASSET_LICENSE.txt', 'CODE_LICENSE.txt']);
+    }
     return modIgnoreFiles;
   }
 
@@ -236,6 +239,23 @@ class PolymodConfig
   {
     if (caseInsensitiveZipLoading == null) caseInsensitiveZipLoading = DefineUtil.getDefineBool('POLYMOD_ZIP_INSENSITIVE', true);
     return caseInsensitiveZipLoading;
+  }
+
+  /**
+   * The file extension for archived mods.
+   *
+   * Set this option by setting the `POLYMOD_ARCHIVE_MOD_EXT` Haxe define at compile time,
+   * or by setting this value in your code.
+   * You can provide multiple values by separating them with commas.
+   *
+   * @default `.zip`
+   */
+  public static var archiveModExt(get, default):Null<Array<String>>;
+
+  static function get_archiveModExt():Null<Array<String>>
+  {
+    if (archiveModExt == null) archiveModExt = DefineUtil.getDefineStringArray('POLYMOD_ARCHIVE_MOD_EXT', ['.zip']);
+    return archiveModExt;
   }
 
   /**

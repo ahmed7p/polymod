@@ -1,16 +1,12 @@
 package polymod.fs;
 
-
 #if sys
-import polymod.util.VersionUtil;
-import polymod.Polymod;
-import polymod.fs.ZipFileSystem.ZipFileSystemParams;
-import polymod.fs.PolymodFileSystem.IFileSystem;
-import polymod.fs.PolymodFileSystem.PolymodFileSystemParams;
 import haxe.Constraints.IMap;
 import haxe.ds.StringMap;
 import haxe.io.Bytes;
 import haxe.io.Path;
+import polymod.Polymod;
+import polymod.fs.ZipFileSystem.ZipFileSystemParams;
 import polymod.util.Util;
 import polymod.util.InsensitiveMap;
 import polymod.util.zip.ZipParser;
@@ -66,7 +62,8 @@ class SysZipFileSystem extends SysFileSystem
   }
   #end
 
-  public override function onLoadMod(modId:String):Void {
+  public override function onLoadMod(modId:String):Void
+  {
     if (!PolymodConfig.fileLock) return;
 
     var modDir:Null<String> = scanModDirectoriesForId(modId);
@@ -98,7 +95,8 @@ class SysZipFileSystem extends SysFileSystem
     }
   }
 
-  public override function onUnloadMod(modId:String):Void {
+  public override function onUnloadMod(modId:String):Void
+  {
     if (!PolymodConfig.fileLock) return;
 
     var modDir:Null<String> = scanModDirectoriesForId(modId);
@@ -123,7 +121,8 @@ class SysZipFileSystem extends SysFileSystem
     }
   }
 
-  function isModDirInZip(dirName:String):Bool {
+  function isModDirInZip(dirName:String):Bool
+  {
     var modPath = Util.pathJoin(modRoot, dirName);
     if (!exists(modPath)) return false;
 
@@ -147,18 +146,19 @@ class SysZipFileSystem extends SysFileSystem
       // we go directly to the zip file and extract the individual file.
 
       // Determine which zip the target file is in.
-      var zipPath = filesLocations.get(path);
-      var zipParser = zipParsers.get(zipPath);
+      var zipPath:Null<String> = filesLocations.get(path);
+      var zipParser:Null<ZipParser> = zipPath != null ? zipParsers.get(zipPath) : null;
 
       // Check that the ZIP is valid.
-      if (zipParser == null || !zipParser.isValid()) {
+      if (zipParser == null || !zipParser.isValid())
+      {
         purgeZipPath(zipPath);
         return null;
       }
 
-      var modId = Path.withoutExtension(Path.withoutDirectory(zipPath));
+      var modId:String = Path.withoutExtension(Path.withoutDirectory(zipPath));
 
-      var innerPath = path;
+      var innerPath:String = path;
       // Remove mod root from path
       if (innerPath.startsWith(modRoot))
       {
@@ -177,7 +177,18 @@ class SysZipFileSystem extends SysFileSystem
         Polymod.debug('Could not access file $innerPath from ZIP ${zipParser.fileName}.');
         return null;
       }
-      var fileBytes = fileHeader.readData();
+
+      var fileBytes:Null<Bytes> = null;
+      try
+      {
+        fileBytes = fileHeader.readData();
+      }
+      catch (e)
+      {
+        // An error occurred while reading the file from the ZIP.
+        Polymod.error(MOD_ARCHIVE_READ_FAILED, 'Failed to read file bytes from archive, is it corrupt?\n$path\n${e}');
+      }
+      fileHeader.cleanupFileHandle();
       return fileBytes;
     }
   }
@@ -273,7 +284,6 @@ class SysZipFileSystem extends SysFileSystem
         var meta:ModMetadata = null;
 
         var metaFile = Util.pathJoin(modPath, PolymodConfig.modMetadataFile);
-        var iconFile = Util.pathJoin(modPath, PolymodConfig.modIconFile);
 
         if (!exists(metaFile))
         {
@@ -294,13 +304,14 @@ class SysZipFileSystem extends SysFileSystem
         meta.dirName = dir;
         meta.modPath = modPath;
 
-        if (!exists(iconFile))
+        var iconFile = getModIconPath(modId, origin);
+        var iconBytes:Null<Bytes> = getFileBytes(iconFile);
+        if (iconBytes == null)
         {
-          Polymod.warning(MOD_MISSING_ICON, 'Could not find mod icon file: $iconFile', origin);
+          Polymod.warning(MOD_MISSING_ICON, 'Could not obtain mod icon data from file: $iconFile', origin);
         }
         else
         {
-          var iconBytes = getFileBytes(iconFile);
           meta.icon = iconBytes;
           meta.iconPath = iconFile;
         }
@@ -353,7 +364,7 @@ class SysZipFileSystem extends SysFileSystem
    */
   public function addAllZips():Void
   {
-    Polymod.debug('Searching for ZIP files in ' + modRoot);
+    Polymod.debug('Searching for archives (${PolymodConfig.archiveModExt}) in $modRoot');
     // Use SUPER because we don't want to add in files within the ZIPs.
     var modRootContents = super.readDirectory(modRoot);
 
@@ -365,15 +376,18 @@ class SysZipFileSystem extends SysFileSystem
       if (isDirectory(filePath)) continue;
 
       // Only process ZIP files.
-      if (StringTools.endsWith(filePath, '.zip'))
+      for (archiveExt in PolymodConfig.archiveModExt)
       {
-        Polymod.debug('- $filePath');
-        addZipFile(filePath);
+        if (StringTools.endsWith(filePath, archiveExt))
+        {
+          Polymod.debug('- $filePath');
+          addZipFile(filePath);
+        }
       }
     }
 
     var zipCount = [for (x in zipParsers.keys()) x].length;
-    Polymod.debug('Loaded ${zipCount} ZIP files containing ${fileDirectories.length} directories.');
+    Polymod.debug('Loaded ${zipCount} archives files containing ${fileDirectories.length} directories.');
   }
 
   /**
@@ -422,7 +436,8 @@ class SysZipFileSystem extends SysFileSystem
     zipParsers.set(zipPath, zipParser);
   }
 
-  function validateZipCache():Void {
+  function validateZipCache():Void
+  {
     for (zipPath => zipParser in zipParsers)
     {
       // Check that the associated ZIP is still valid.
@@ -439,14 +454,16 @@ class SysZipFileSystem extends SysFileSystem
    *
    * @param zipPath
    */
-  function purgeZipPath(zipPath:String):Void {
+  function purgeZipPath(zipPath:String):Void
+  {
     Polymod.debug('Purging invalid ZIP: ${zipPath}');
 
     zipParsers.remove(zipPath);
 
     for (filePath => fileZipPath in filesLocations)
     {
-      if (fileZipPath == zipPath) {
+      if (fileZipPath == zipPath)
+      {
         Polymod.debug('  - ${filePath}');
         filesLocations.remove(filePath);
         if (fileDirectories.contains(filePath)) fileDirectories.remove(filePath);

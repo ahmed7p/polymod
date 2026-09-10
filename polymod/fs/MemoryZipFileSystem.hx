@@ -6,8 +6,6 @@ import polymod.util.Util;
 import haxe.io.Bytes;
 import haxe.io.BytesInput;
 import haxe.io.Path;
-import polymod.fs.PolymodFileSystem.IFileSystem;
-import polymod.fs.PolymodFileSystem.PolymodFileSystemParams;
 
 #if !html5
 /**
@@ -100,7 +98,7 @@ class MemoryZipFileSystem extends MemoryFileSystem
   {
     var compressedBytes = super.getFileBytes(path);
 
-    if (pathIsCompressed.get(path) != null && pathIsCompressed.get(path)) return Util.unzipBytes(compressedBytes);
+    if (pathIsCompressed.exists(path) && pathIsCompressed.get(path)) return Util.unzipBytes(compressedBytes);
 
     return compressedBytes; // if it wasn't actually compressed
   }

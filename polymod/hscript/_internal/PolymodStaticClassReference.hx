@@ -1,7 +1,9 @@
 package polymod.hscript._internal;
 
 import polymod.hscript._internal.Expr;
+import polymod.util.Util;
 
+using Lambda;
 using StringTools;
 
 /**
@@ -11,9 +13,17 @@ using StringTools;
  */
 class PolymodStaticClassReference
 {
-  public var cls:ClassDecl;
+  public var cls:Null<ClassDecl>;
 
-  public function new(cls:ClassDecl)
+  public var canInstantiate(get, never):Bool;
+
+  public function get_canInstantiate():Bool
+  {
+    var ctorField = cls.fields.find((f) -> f.name == 'new');
+    return !ctorField.access.contains(APrivate);
+  }
+
+  public function new(?cls:ClassDecl)
   {
     this.cls = cls;
   }
@@ -25,6 +35,12 @@ class PolymodStaticClassReference
    */
   public static function tryBuild(clsName:String):Null<PolymodStaticClassReference>
   {
+    #if POLYMOD_CPPIA
+    // cppia are first always before hscript
+    var cppia = PolymodCppiaClassReference.tryBuildCppia(clsName);
+    if (cppia != null) return cppia;
+    #end
+
     @:privateAccess {
       if (Interp._scriptClassDescriptors.exists(clsName))
       {
@@ -118,11 +134,7 @@ class PolymodStaticClassReference
    */
   public function getFullyQualifiedName():String
   {
-    if (this.cls.pkg != null && this.cls.pkg.length > 0)
-    {
-      return this.cls.pkg.join(".") + "." + this.cls.name;
-    }
-    return this.cls.name;
+    return Util.getFullClassName(cls);
   }
 
   public function toString():String

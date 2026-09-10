@@ -69,7 +69,7 @@ class Parser
   public var opRightAssoc:Map<String, Bool>;
 
   /**
-    allows to check for #if / #else in code
+    allows checking for #if / #else in code
   **/
   public static var preprocessorValues(get, default):Map<String, Dynamic>;
 
@@ -103,6 +103,8 @@ class Parser
   var ops:Array<Bool>;
   var idents:Array<Bool>;
   var uid:Int = 0;
+
+  var packageSet:Bool = false;
 
   #if hscriptPos
   var origin:String;
@@ -1463,6 +1465,13 @@ class Parser
     switch (ident)
     {
       case "package":
+        #if POLYMOD_STRICT_SYNTAX
+        if (!packageSet)
+          packageSet = true;
+        else
+          error(ECustom("Unknown identifier: package"), currentPos, currentPos); // Throw an error if there was a package already set.
+        #end
+
         var path = parsePath();
         ensure(TSemicolon);
         return DPackage(path);
@@ -1564,6 +1573,7 @@ class Parser
             imports: [],
             importsToValidate: [],
             usings: [],
+            usingsToValidate: [],
             staticFields: [],
           });
       case "typedef":
@@ -1663,9 +1673,17 @@ class Parser
         case "override":
           access.push(AOverride);
         case "public":
-          access.push(APublic);
+          // Throw an error if the user tries declaring a variable as public when it's already been declared private.
+          if (access.contains(APrivate))
+            error(ECustom("Conflicting access modifier public"), currentPos, currentPos);
+          else if (!access.contains(APublic))
+            access.push(APublic);
         case "private":
-          access.push(APrivate);
+          // Throw an error if the user tries declaring a variable as private when it's already been declared public.
+          if (access.contains(APublic))
+            error(ECustom("Conflicting access modifier private"), currentPos, currentPos);
+          else if (!access.contains(APrivate))
+            access.push(APrivate);
         case "inline":
           access.push(AInline);
         case "static":
@@ -1673,6 +1691,11 @@ class Parser
         case "macro":
           access.push(AMacro);
         case "function":
+          if (access.contains(AOverride) && access.contains(AStatic))
+          {
+            error(EInvalidAccessorCombination(['override', 'static']), currentPos, currentPos);
+          }
+
           var name = getIdent();
           var inf = parseFunctionDecl();
           maybe(TSemicolon);
@@ -1712,6 +1735,13 @@ class Parser
           }
           else
             ensure(TSemicolon);
+
+          #if POLYMOD_STRICT_SYNTAX
+          if (access.contains(AInline) && !access.contains(AStatic))
+          {
+            error(ECustom('Invalid modifier: inline on non-static variable'), currentPos, currentPos);
+          }
+          #end
 
           return {
             name: name,
@@ -2048,7 +2078,7 @@ class Parser
               // Unlike readString, we don't care if we find a nested interpolated string
               // we just assume parseString will recursively take care of it instead.
               var e:Expr = parseString(b.toString() #if hscriptPos, origin, p1 + i - b.length #end);
-              if (expr(e).match(EBinop(_, _, _)))
+              if (!(expr(e).match(EIdent(_)) || expr(e).match(EParent(_))))
               {
                 e = mk(EParent(e), pmin(e), pmax(e));
               }
@@ -2497,7 +2527,7 @@ class Parser
         {
           preprocStack[preprocStack.length - 1].r = false;
           skipTokens();
-          return token();
+          return id == 'else' ? token() : preprocess('if');
         }
         else if (id == "else")
         {
@@ -2625,5 +2655,10 @@ class Parser
   {
     if (preprocessorValues == null) preprocessorValues = DefineUtil.getDefines();
     return preprocessorValues;
+  }
+
+  public static function resetPreprocessorValues():Void
+  {
+    preprocessorValues = null;
   }
 }

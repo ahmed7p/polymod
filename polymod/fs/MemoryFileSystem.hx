@@ -2,11 +2,7 @@ package polymod.fs;
 
 import haxe.io.Bytes;
 import haxe.io.Path;
-import polymod.Polymod;
 import polymod.util.Util;
-import polymod.util.VersionUtil;
-import thx.semver.VersionRule;
-import polymod.fs.PolymodFileSystem.IFileSystem;
 import polymod.fs.PolymodFileSystem.PolymodFileSystemParams;
 
 /**
@@ -21,11 +17,10 @@ import polymod.fs.PolymodFileSystem.PolymodFileSystemParams;
  * Using this file system directly is not recommended, as it is not optimized for native platforms.
  * If you can use a native file system, use `SysFileSystem` or `ZipFileSystem` instead.
  */
-class MemoryFileSystem implements IFileSystem
+class MemoryFileSystem extends BaseFileSystem
 {
-  var files:Map<String, Bytes> = new Map<String, Bytes>();
+  var files:Map<String, Bytes> = [];
   var directories:Array<String> = [];
-  var modRoot:String = '';
 
   /**
    * Receive parameters to instantiate the MemoryFileSystem.
@@ -33,7 +28,8 @@ class MemoryFileSystem implements IFileSystem
   public function new(params:PolymodFileSystemParams)
   {
     // No-op constructor.
-    modRoot = (params.modRoot == null) ? '' : params.modRoot;
+    params.modRoot ??= '';
+    super(params);
   }
 
   /**
@@ -70,7 +66,7 @@ class MemoryFileSystem implements IFileSystem
    */
   public function clear():Void
   {
-    files = new Map<String, Bytes>();
+    files.clear();
     directories = [];
   }
 
@@ -84,22 +80,6 @@ class MemoryFileSystem implements IFileSystem
   {
     path = Path.removeTrailingSlashes(path);
     return files.exists(path) || directories.contains(path); // checks both files and folders
-  }
-
-  /**
-   * Return whether the file or directory exists in a specific mod.
-   *
-   * @param path The path to check.
-   * @param modId A specific mod ID to check within.
-   * @return Whether the file or directory exists in that mod.
-   */
-  public function existsByModId(path:String, modId:String):Bool
-  {
-    var modDir:Null<String> = scanModDirectoriesForId(modId);
-    if (modDir == null) return false;
-    var relativeDir = Util.pathJoin(modRoot, modDir);
-
-    return exists(Util.pathJoin(relativeDir, path));
   }
 
   /**
@@ -149,19 +129,6 @@ class MemoryFileSystem implements IFileSystem
   }
 
   /**
-   * Returns the content of a given file as a string.
-   *
-   * @param path The file to read.
-   * @return The text content of the file, or `null` if the file can't be found.
-   */
-  public function getFileContent(path:String):Null<String>
-  {
-    var fileBytes = getFileBytes(path);
-    if (fileBytes == null) return null;
-    return fileBytes.toString();
-  }
-
-  /**
    * Returns the content of a given file as Bytes.
    *
    * @param path The file to read.
@@ -170,22 +137,6 @@ class MemoryFileSystem implements IFileSystem
   public function getFileBytes(path:String):Null<Bytes>
   {
     return files.get(path);
-  }
-
-  /**
-   * Get the byte data for a file from a specific mod.
-   *
-   * @param path The path to retrieve byte data from, relative to the asset root.
-   * @param modId A specific mod ID to retrieve an asset from.
-   * @return The file bytes, or `null` if it couldn't be fetched.
-   */
-  public function getFileBytesByModId(path:String, modId:String):Null<haxe.io.Bytes>
-  {
-    var modDir:Null<String> = scanModDirectoriesForId(modId);
-    if (modDir == null) return null;
-    var relativeDir = Util.pathJoin(modRoot, modDir);
-
-    return getFileBytes(Util.pathJoin(relativeDir, path));
   }
 
   /**
@@ -213,117 +164,5 @@ class MemoryFileSystem implements IFileSystem
     // 	return dir.indexOf(path) == 0;
     // }));
     return result;
-  }
-
-  /**
-   * Provide a list of valid mods for this file system to load.
-   *
-   * @param apiVersionRule (optional) A version query to match against the mod's API version.
-   * @return An array of matching mods.
-   */
-  public function scanMods(?apiVersionRule:VersionRule):Array<ModMetadata>
-  {
-    if (apiVersionRule == null) apiVersionRule = VersionUtil.DEFAULT_VERSION_RULE;
-
-    var dirs = readDirectory(modRoot);
-    var result:Array<ModMetadata> = [];
-    for (dir in dirs)
-    {
-      var testDir = Util.pathJoin(modRoot, dir);
-
-      if (!exists(testDir)) continue;
-
-      if (!isDirectory(testDir)) continue;
-
-      var meta:ModMetadata = getMetadataByModDir(dir, PolymodErrorOrigin.SCAN);
-
-      if (meta == null) continue;
-
-      if (!meta.isCompatible(apiVersionRule)) continue;
-
-      result.push(meta);
-    }
-
-    return result;
-  }
-
-  /**
-   * Get the metadata for a given mod.
-   * This function is DEPRECATED, use `getMetadataByModDir` for the same result.
-   *
-   * @param dirName The directory name of the mod.
-   * @param origin The error reporting origin.
-   * @return The mod metadata, or `null` if not found.
-   */
-  @:deprecated('getMetadata is deprecated, use getMetadataByModDir')
-  public function getMetadata(dirName:String, ?origin:PolymodErrorOrigin):Null<ModMetadata>
-  {
-    return getMetadataByModDir(dirName, origin);
-  }
-
-  /**
-   * Provides the metadata for a given mod by its directory.
-   *
-   * @param dirName The directory of the mod.
-   * @param origin The context the error occurred in (while scanning for mods, while initializing mods, etc.).
-   *   Used for error reporting.
-   * @return The mod metadata, or `null` if the mod does not exist.
-   */
-  public function getMetadataByModDir(dirName:String, ?origin:PolymodErrorOrigin):Null<ModMetadata>
-  {
-    var modpath = Util.pathJoin(modRoot, dirName);
-    if (exists(modpath))
-    {
-      var meta:ModMetadata = null;
-
-      var metaFile = Util.pathJoin(modpath, PolymodConfig.modMetadataFile);
-      var iconFile = Util.pathJoin(modpath, PolymodConfig.modIconFile);
-
-      if (!exists(metaFile))
-      {
-        Polymod.warning(MOD_MISSING_METADATA, 'Could not find mod metadata file: $metaFile', origin);
-        return null;
-      }
-      else
-      {
-        var metaText = getFileContent(metaFile);
-        meta = ModMetadata.fromJsonStr(metaText, origin);
-        if (meta == null) return null;
-
-        meta.id = meta.id == '' ? dirName : meta.id;
-        meta.dirName = dirName;
-        meta.modPath = modpath;
-      }
-
-      if (!exists(iconFile))
-      {
-        Polymod.warning(MOD_MISSING_ICON, 'Could not find mod icon file: $iconFile', origin);
-      }
-      else
-      {
-        var iconBytes = getFileBytes(iconFile);
-        meta.icon = iconBytes;
-        meta.iconPath = iconFile;
-      }
-      return meta;
-    }
-    else
-    {
-      Polymod.error(MOD_MISSING_DIRECTORY, 'Could not find mod directory: $dirName', origin);
-    }
-    return null;
-  }
-
-  /**
-   * Provides the metadata for a given mod by its ID.
-   *
-   * @param modId The ID of the mod.
-   * @param origin The context the error occurred in (while scanning for mods, while initializing mods, etc.).
-   *   Used for error reporting.
-   * @return The mod metadata, or `null` if the mod does not exist.
-   */
-  public function getMetadataByModId(modId:String, ?origin:PolymodErrorOrigin):Null<ModMetadata>
-  {
-    return null;
   }
 }
