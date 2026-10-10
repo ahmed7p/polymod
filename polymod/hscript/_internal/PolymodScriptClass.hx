@@ -1155,7 +1155,7 @@ class PolymodScriptClass
   public function callFunction(fnName:String, ?args:Array<Dynamic>):Null<Dynamic>
   {
     var field = findField(fnName);
-    var fn = (field != null) ? findFunction(fnName, true) : null;
+    var fn = (field != null) ? findFunction(fnName) : null;
 
     if (fn != null)
     {
@@ -1239,10 +1239,7 @@ class PolymodScriptClass
    */
   public function hasScriptFunction(name:String):Bool
   {
-    var field = findField(name);
-    var fn = (field != null) ? findFunction(name, true) : null;
-
-    return fn != null;
+    return findFunction(name) != null;
   }
 
   /**
@@ -1261,16 +1258,6 @@ class PolymodScriptClass
     if (fnName == 'toString')
     {
       return true;
-    }
-
-    var _super:Dynamic = superClass;
-    while (Std.isOfType(_super, PolymodScriptClass))
-    {
-      if (_super.hasScriptFunction(fnName))
-      {
-        return true;
-      }
-      _super = _super.superClass;
     }
 
     if (findSuperFunction(fnName) != null)
@@ -1401,7 +1388,7 @@ class PolymodScriptClass
    *                  If true, ignore uncached fields.
    * @param excludeStatic If true, exclude static fields.
    */
-  private function findFunction(name:String, cacheOnly:Bool = true, excludeStatic:Bool = true):Null<FunctionDecl>
+  private function findFunction(name:String, cacheOnly:Bool = true):Null<FunctionDecl>
   {
     if (_cachedFunctionDecls != null && _cachedFunctionDecls.exists(name))
     {
@@ -1414,7 +1401,6 @@ class PolymodScriptClass
     switch (fn.kind)
     {
       case KFunction(func):
-        if (excludeStatic && fn.access.contains(AStatic)) return null;
         _cachedFunctionDecls.set(name, func);
         return func;
       default:
@@ -1432,17 +1418,22 @@ class PolymodScriptClass
       return _cachedSuperFunctionDecls.get(name);
     }
 
-    if (Std.isOfType(superClass, PolymodScriptClass))
+    var _super:Dynamic = superClass;
+    while (Std.isOfType(_super, PolymodScriptClass))
     {
-      var func = Reflect.field(superClass, name);
-      if (func == null) return null;
+      var func = _super.findFunction(name);
+      if (func == null)
+      {
+        _super = _super.superClass;
+        continue;
+      }
 
       _cachedSuperFunctionDecls.set(name, func);
       return func;
     }
 
-    var func = Reflect.field(superClass, name);
-    if (func == null) return null;
+    var func = Reflect.field(_super, name);
+    if (func == null || !Reflect.isFunction(func)) return null;
     _cachedSuperFunctionDecls.set(name, func);
     return func;
   }
